@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package connection_manager;
+
+service ConnectionManager {
+    rpc RequestConnection (ConnectRequest) returns (ConnectResponse);
+    rpc Listen (ConnectRequest) returns (ConnectResponse);
+}
+
+message ConnectRequest {
+    uint32 client_id = 1;
+}
+
+message ConnectResponse {
+    uint32 server_port = 1;
+}
+
+message ClientCommand {
+    oneof command {
+        ConnectRequest connect_request = 1;
+    }
+}
+
+message ServerReply {
+    oneof reply {
+        ConnectResponse connect_response = 1;
+    }
+}

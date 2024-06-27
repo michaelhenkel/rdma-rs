@@ -1,0 +1,21 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.7", features = ["derive"] }
+libc = "0.2.155"
+rdma-sys = "0.3.0"
+rdma-rs = { path = "../" }
+tokio = { version = "1.38.0", features = ["full"] }
+tonic = "0.11.0"
+portpicker = "0.1.1"
+prost = "0.12.6"
+tokio-stream = "0.1.15"
+
+[build-dependencies]
+tonic-build = "0.11.0"
