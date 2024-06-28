@@ -21,7 +21,7 @@ impl RdmaServer{
     }
     pub async fn run(&self) -> anyhow::Result<()>{
         let mut rx = self.rx.write().await;
-        let my_id = Arc::new(Mutex::new(MyId(null_mut())));
+        let my_id = Arc::new(Mutex::new(Id(null_mut())));
         while let Some(rdma_server_command) = rx.recv().await{
             let rdma_server = self.clone();
             match rdma_server_command{
@@ -44,7 +44,7 @@ impl RdmaServer{
         println!("rdma server stopped");
         Ok(())
     }
-    pub async fn connect(self, address: String, port: u16) -> anyhow::Result<MyId, CustomError>{
+    pub async fn connect(self, address: String, port: u16) -> anyhow::Result<Id, CustomError>{
         let port = format!("{}\0",port);
         let address = format!("{}\0",address);
         let port = port.as_str();
@@ -79,19 +79,19 @@ impl RdmaServer{
             unsafe { rdma_freeaddrinfo(res); }
             return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
         }
-    
+        println!("Waiting for connection");
         let ret = unsafe { rdma_listen(listen_id, 0) };
         if ret != 0 {
             unsafe { rdma_destroy_ep(listen_id); }
             return Err(CustomError::new("rdma_listen".to_string(), ret).into());
         }
-
+        
         let ret = unsafe { rdma_get_request(listen_id, &mut id) };
         if ret != 0 {
             unsafe { rdma_destroy_ep(listen_id); }
             return Err(CustomError::new("rdma_get_request".to_string(), ret).into());
         }
-    
+        println!("Connection received, accepting it");
         let ret = unsafe { rdma_accept(id, null_mut()) };
         if ret != 0 {
             return Err(CustomError::new("rdma_accept".to_string(), ret).into());
@@ -115,13 +115,12 @@ impl RdmaServer{
         if id.is_null() {
             return Err(CustomError::new("rdma_get_request".to_string(), ret).into());
         }
-        Ok(MyId(id))
+        Ok(Id(id))
     }
-    pub async fn listen(&self, my_id: Arc<Mutex<MyId>>) -> anyhow::Result<u8, CustomError> {
-        println!("listening");
+    pub async fn listen(&self, my_id: Arc<Mutex<Id>>) -> anyhow::Result<u8, CustomError> {
         let my_id_clone = my_id.clone();
         let my_id_lock = my_id_clone.lock().unwrap();
-        let id = my_id_lock.0;
+        let id = Id(my_id_lock.0);
         /* 
         let recv_cq = unsafe { (*id).recv_cq };
         if !recv_cq.is_null(){
@@ -148,45 +147,46 @@ impl RdmaServer{
         */
         
         let mut metadata_request = MetaData::default();
-        let metadata_buffer: *mut MetaData = &mut metadata_request;
-        let recv_mr = register_send_recv_mr(id, metadata_buffer.cast(), MetaData::LEN)?;
-        let opcode = rdma_recv_md(id, recv_mr, metadata_buffer.cast(), MetaData::LEN)?;
-        println!("received metadata request {:?}, opcode: {}", metadata_request, opcode);
-        if metadata_request.request_type == 1 {
-            let res = self.write(id, recv_mr, metadata_request, metadata_buffer)?;
-            return Ok(res);
+        let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
+        metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
+        println!("{:?}", metadata_request.get_request_type());
+        match metadata_request.get_request_type(){
+            MetaDataRequestTypes::WriteRequest => {
+                let mut data = Data::new(metadata_request.message_size() as usize);
+                data.create_and_register_mr(&id, Operation::Write)?;
+                metadata_request.set_request_type(MetaDataRequestTypes::WriteResponse);
+                metadata_request.set_remote_address(data.mr_addr());
+                metadata_request.set_rkey(data.mr_rkey());
+                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
+                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
+                return Ok(metadata_request.get_request_type() as u8);
+            },
+            MetaDataRequestTypes::SendRequest => {
+                let mut data = Data::new(metadata_request.message_size() as usize);
+                let data_mr_addr = data.create_and_register_mr(&id, Operation::SendRecv)?;
+                metadata_request.set_request_type(MetaDataRequestTypes::SendResponse);
+                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
+                data.rdma_recv_data(&id, &data_mr_addr, metadata_request.iterations() as usize)?;
+                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
+                return Ok(metadata_request.get_request_type() as u8);
+            },
+            MetaDataRequestTypes::ReadRequest => {
+                let mut data = Data::new(metadata_request.message_size() as usize);
+                data.create_and_register_mr(&id, Operation::Read)?;
+                metadata_request.set_request_type(MetaDataRequestTypes::ReadResponse);
+                metadata_request.set_remote_address(data.mr_addr());
+                metadata_request.set_rkey(data.mr_rkey());
+                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
+                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
+                return Ok(metadata_request.get_request_type() as u8);
+            },
+            MetaDataRequestTypes::Disconnect => {
+                return Ok(0);
+            },
+            _ => {
+                return Ok(0);
+            }
         }
-        if metadata_request.request_type == 4 {
-            let res = self.recv(id, recv_mr, metadata_request, metadata_buffer)?;
-            return Ok(res);
-        }
-        Ok(0)
-    }
-    fn write(&self, id: *mut rdma_cm_id, recv_mr: *mut ibv_mr, metadata_request: MetaData, metadata_buffer: *mut MetaData) -> anyhow::Result<u8, CustomError> {
-        let mut data_buffer = vec![0u8; metadata_request.length as usize];
-        let write_mr = register_write_mr(id, data_buffer.as_mut_ptr().cast(), data_buffer.len())?;
-        unsafe { (*metadata_buffer).request_type = 2 };
-        unsafe { (*metadata_buffer).address = (*write_mr).addr as u64 };
-        unsafe { (*metadata_buffer).length = data_buffer.len() as u32 };
-        unsafe { (*metadata_buffer).rkey = (*write_mr).rkey as u32 };
-        rdma_send_md(id, recv_mr, metadata_buffer.cast(), MetaData::LEN)?;
-        println!("sent request done {} ", unsafe { (*metadata_buffer).request_type });
-        unsafe { (*metadata_buffer).request_type = 5 };
-        let opcode = rdma_recv_md(id, recv_mr, metadata_buffer.cast(), MetaData::LEN)?;
-        println!("received opcode {}", opcode);
-        println!("write request done {} ", unsafe { (*metadata_buffer).request_type });
-        Ok(unsafe { (*metadata_buffer).request_type })
-    }
-    fn recv(&self, id: *mut rdma_cm_id, recv_md_mr: *mut ibv_mr, metadata_request: MetaData, metadata_buffer: *mut MetaData) -> anyhow::Result<u8, CustomError> {
-        let mut data_buffer = vec![0u8; metadata_request.length as usize];
-        let recv_data_mr = register_send_recv_mr(id, data_buffer.as_mut_ptr().cast(), data_buffer.len())?;
-        unsafe { (*metadata_buffer).request_type = 5 };
-        rdma_send_md(id, recv_md_mr, metadata_buffer.cast(), MetaData::LEN)?;
-        let iterations = unsafe { (*metadata_buffer).iterations };
-        rdma_recv_data(id, recv_data_mr, data_buffer.as_mut_ptr().cast(), data_buffer.len(), iterations as usize)?;
-        rdma_recv_md(id, recv_md_mr, metadata_buffer.cast(), MetaData::LEN)?;
-        println!("recv request done");
-        Ok(unsafe { (*metadata_buffer).request_type })
     }
 }
 

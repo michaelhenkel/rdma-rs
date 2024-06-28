@@ -4,13 +4,13 @@ use rdma_sys::*;
 
 
 pub struct RdmaClient{
-    id: *mut rdma_cm_id,
+    id: Id,
 }
 
 impl RdmaClient{
     pub fn new() -> RdmaClient{
         RdmaClient{
-            id: null_mut(),
+            id: Id(null_mut()),
         }
     }
 
@@ -68,66 +68,87 @@ impl RdmaClient{
             unsafe { rdma_disconnect(id); }
             return Err(CustomError::new("rdma_connect".to_string(), ret).into());
         }
-        self.id = id;
+        self.id = Id(id);
         Ok(())
     }
 
     pub fn disconnect(&self) -> anyhow::Result<(), CustomError>{
+        println!("Disconnecting");
         let mut metadata_request = MetaData::default();
-        metadata_request.request_type = 0;
-        let metadata_request_ptr: *mut MetaData = &mut metadata_request;
-        let send_mr = register_send_recv_mr(self.id, metadata_request_ptr.cast(), MetaData::LEN)?;
-        rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-        println!("sent disconnect");
+        metadata_request.set_request_type(MetaDataRequestTypes::Disconnect);
+        let mr_addr = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
+        metadata_request.rdma_send(&self.id, &mr_addr)?;
         Ok(())
     }
 
     pub fn write(&self, message_size: usize, iterations: usize) -> anyhow::Result<(), CustomError> {
         let mut metadata_request = MetaData::default();
-        metadata_request.request_type = 1;
-        metadata_request.length = message_size as u32;
-        let metadata_request_ptr: *mut MetaData = &mut metadata_request;
-        let send_mr = register_send_recv_mr(self.id, metadata_request_ptr.cast(), MetaData::LEN)?;
-        rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-        rdma_recv_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-        if metadata_request.request_type == 2 {
-            let mut data_buffer = vec![1u8; message_size];
-            let write_mr = register_write_mr(self.id, data_buffer.as_mut_ptr().cast(), data_buffer.len())?;
-            let my_mr = MyMr(write_mr);
-            let my_id = MyId(self.id);
-            let my_addr = MyAddress(data_buffer.as_mut_ptr().cast());
-            rdma_write(my_id, my_mr, my_addr, data_buffer.len(), metadata_request.rkey, metadata_request.address, iterations)?;
-            println!("done writing data");
-            metadata_request.request_type = 3;
-            println!("sending md done {} ", unsafe { (*metadata_request_ptr).request_type });
-            rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-            println!("done sending metadata");
-            //rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-            println!("done sending metadata");
+        metadata_request.set_request_type(MetaDataRequestTypes::WriteRequest);
+        metadata_request.set_message_size(message_size as u32);
+        let metadata_mr_addr = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
+        metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
+        metadata_request.rdma_recv(&self.id, &metadata_mr_addr)?;
+        match metadata_request.get_request_type(){
+            MetaDataRequestTypes::WriteResponse => {
+                let mut data = Data::new(message_size);
+                data.create_and_register_mr(&self.id, Operation::Write)?;
+                data.rdma_write(&self.id, metadata_request.rkey(), metadata_request.remote_address(), iterations)?;
+                println!("RDMA Write finished");
+                metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
+                metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
+            },
+            _ => {
+                return Err(CustomError::new("unexpected request type".to_string(), 0).into());
+            }  
         }
         Ok(())
     }
+    
     pub fn send(&self, message_size: usize, iterations: usize) -> anyhow::Result<(), CustomError> {
         let mut metadata_request = MetaData::default();
-        metadata_request.request_type = 4;
-        metadata_request.length = message_size as u32;
-        metadata_request.iterations = iterations as u32;
-        let metadata_request_ptr: *mut MetaData = &mut metadata_request;
-        let send_md_mr = register_send_recv_mr(self.id, metadata_request_ptr.cast(), MetaData::LEN)?;
-        rdma_send_md(self.id, send_md_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-        rdma_recv_md(self.id, send_md_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-        if metadata_request.request_type == 5 {
-            let mut data_buffer = vec![3u8; message_size];
-            let send_data_mr = register_send_recv_mr(self.id, data_buffer.as_mut_ptr().cast(), data_buffer.len())?;
-            let my_mr = MyMr(send_data_mr);
-            let my_id = MyId(self.id);
-            let my_addr = MyAddress(data_buffer.as_mut_ptr().cast());
-            rdma_send_data(my_id, my_mr, my_addr, data_buffer.len(), iterations)?;
-            println!("done sending data");
-            unsafe { (*metadata_request_ptr).request_type = 0};
-            rdma_send_md(self.id, send_md_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
-            println!("done sending metadata");
+        metadata_request.set_request_type(MetaDataRequestTypes::SendRequest);
+        metadata_request.set_message_size(message_size as u32);
+        metadata_request.set_iterations(iterations as u32);
+        let mr_ar = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
+        metadata_request.rdma_send(&self.id, &mr_ar)?;
+        metadata_request.rdma_recv(&self.id, &mr_ar)?;
+        match metadata_request.get_request_type(){
+            MetaDataRequestTypes::SendResponse => {
+                let mut data = Data::new(message_size);
+                let data_mr_addr = data.create_and_register_mr(&self.id, Operation::SendRecv)?;
+                data.rdma_send_data(&self.id, &data_mr_addr, iterations)?;
+                println!("Send finished");
+                metadata_request.set_request_type(MetaDataRequestTypes::SendFinished);
+                metadata_request.rdma_send(&self.id, &mr_ar)?;
+            },
+            _ => {
+                return Err(CustomError::new("unexpected request type".to_string(), 0).into());
+            }
         }
         Ok(())
     }
+
+    pub fn read(&self, message_size: usize, iterations: usize) -> anyhow::Result<(), CustomError> {
+        let mut metadata_request = MetaData::default();
+        metadata_request.set_request_type(MetaDataRequestTypes::ReadRequest);
+        metadata_request.set_message_size(message_size as u32);
+        let metadata_mr_addr = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
+        metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
+        metadata_request.rdma_recv(&self.id, &metadata_mr_addr)?;
+        match metadata_request.get_request_type(){
+            MetaDataRequestTypes::ReadResponse => {
+                let mut data = Data::new(message_size);
+                data.create_and_register_mr(&self.id, Operation::Read)?;
+                data.rdma_read(&self.id, metadata_request.rkey(), metadata_request.remote_address(), iterations)?;
+                println!("RDMA Read finished");
+                metadata_request.set_request_type(MetaDataRequestTypes::ReadFinished);
+                metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
+            },
+            _ => {
+                return Err(CustomError::new("unexpected request type".to_string(), 0).into());
+            }  
+        }
+        Ok(())
+    }
+    
 }
