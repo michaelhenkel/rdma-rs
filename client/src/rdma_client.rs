@@ -78,6 +78,7 @@ impl RdmaClient{
         let metadata_request_ptr: *mut MetaData = &mut metadata_request;
         let send_mr = register_send_recv_mr(self.id, metadata_request_ptr.cast(), MetaData::LEN)?;
         rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
+        println!("sent disconnect");
         Ok(())
     }
 
@@ -95,12 +96,13 @@ impl RdmaClient{
             let my_mr = MyMr(write_mr);
             let my_id = MyId(self.id);
             let my_addr = MyAddress(data_buffer.as_mut_ptr().cast());
-            println!("writing data");
             rdma_write(my_id, my_mr, my_addr, data_buffer.len(), metadata_request.rkey, metadata_request.address, iterations)?;
             println!("done writing data");
             metadata_request.request_type = 3;
-
+            println!("sending md done {} ", unsafe { (*metadata_request_ptr).request_type });
             rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
+            println!("done sending metadata");
+            //rdma_send_md(self.id, send_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
             println!("done sending metadata");
         }
         Ok(())
@@ -122,7 +124,7 @@ impl RdmaClient{
             let my_addr = MyAddress(data_buffer.as_mut_ptr().cast());
             rdma_send_data(my_id, my_mr, my_addr, data_buffer.len(), iterations)?;
             println!("done sending data");
-            metadata_request.request_type = 3;
+            unsafe { (*metadata_request_ptr).request_type = 0};
             rdma_send_md(self.id, send_md_mr, metadata_request_ptr.cast(), MetaData::LEN)?;
             println!("done sending metadata");
         }
