@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<(), CustomError> {
     let mut rdma_client = RdmaClient::new();
     rdma_client.connect(server,port)?;
     grpc_client.listen().await.unwrap();
-    rdma_client.read(args.msg_size, args.iterations)?;
-    rdma_client.send(args.msg_size, args.iterations)?;
+    //rdma_client.read(args.msg_size, args.iterations)?;
+    //rdma_client.send(args.msg_size, args.iterations)?;
     rdma_client.write(args.msg_size, args.iterations)?;
     rdma_client.disconnect()?;
     println!("Client done");

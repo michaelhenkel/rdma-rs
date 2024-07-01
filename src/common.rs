@@ -2,7 +2,7 @@ use std::{fmt::Display, ptr::{self, null_mut}};
 use libc::{c_int, c_void};
 use rdma_sys::*;
 
-const BATCH_SIZE: usize = 2000;
+const BATCH_SIZE: usize = 10;
 
 #[derive(Debug)]
 pub struct CustomError{
