@@ -9,6 +9,7 @@ service ConnectionManager {
 
 message ConnectRequest {
     uint32 client_id = 1;
+    uint32 qp_idx = 2;
 }
 
 message ConnectResponse {

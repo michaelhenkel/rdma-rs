@@ -26,13 +26,16 @@ impl RdmaServer{
             let rdma_server = self.clone();
             match rdma_server_command{
                 RdmaServerCommand::Listen{tx} => {
-                    loop {
-                        let ret = rdma_server.listen(my_id.clone()).await.unwrap();
-                        if ret == 0 {
-                            break;
+                    let my_id = my_id.clone();
+                    tokio::spawn(async move{
+                        loop {
+                            let ret = rdma_server.listen(my_id.clone()).await.unwrap();
+                            if ret == 0 {
+                                break;
+                            }
                         }
-                    }
-                    tx.send(()).unwrap();
+                        tx.send(()).unwrap();
+                    });
                 },
                 RdmaServerCommand::Connect{address, port} => {
                     let id = rdma_server.connect(address, port).await.unwrap();
@@ -118,6 +121,7 @@ impl RdmaServer{
         Ok(Id(id))
     }
     pub async fn listen(&self, my_id: Arc<Mutex<Id>>) -> anyhow::Result<u8, CustomError> {
+        println!("Listening");
         let my_id_clone = my_id.clone();
         let my_id_lock = my_id_clone.lock().unwrap();
         let id = Id(my_id_lock.0);
@@ -148,6 +152,7 @@ impl RdmaServer{
         
         let mut metadata_request = MetaData::default();
         let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
+        println!("waiting for metadata request");
         metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
         println!("{:?}", metadata_request.get_request_type());
         match metadata_request.get_request_type(){

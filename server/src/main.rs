@@ -2,7 +2,6 @@ use clap::Parser;
 use common::CustomError;
 use grpc_server::GrpcServer;
 use server_manager::ServerManager;
-use rdma_server::RdmaServer;
 
 pub mod grpc_server;
 pub mod connection_manager;
@@ -24,14 +23,7 @@ async fn main() -> anyhow::Result<(), CustomError> {
 
     let mut jh_list = Vec::new();
 
-    let rdma_server = RdmaServer::new();
-    let rdma_server_client = rdma_server.client.clone();
-    let jh = tokio::spawn(async move{
-        rdma_server.run().await.unwrap();
-    });
-    jh_list.push(jh);
-
-    let sm = ServerManager::new(args.address.clone(), rdma_server_client);
+    let sm = ServerManager::new(args.address.clone());
     let sm_client = sm.client.clone();
     let jh = tokio::spawn(async move{
         sm.run().await;

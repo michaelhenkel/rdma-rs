@@ -9,19 +9,19 @@ pub struct GrpcClient{
 }
 
 impl GrpcClient{
-    pub async fn request_connection(&self) -> anyhow::Result<u32>{
+    pub async fn request_connection(&self, qp_idx: u32) -> anyhow::Result<u32>{
         let address = self.address.clone();
         let client_id = self.client_id;
         let mut client = ConnectionManagerClient::connect(address).await.unwrap();
-        let request = Request::new(ConnectRequest{client_id});
+        let request = Request::new(ConnectRequest{client_id, qp_idx});
         let response = client.request_connection(request).await.unwrap().into_inner();
         Ok(response.server_port)
     }
-    pub async fn listen(&self) -> anyhow::Result<()>{
+    pub async fn listen(&self, qp_idx: u32) -> anyhow::Result<()>{
         let address = self.address.clone();
         let client_id = self.client_id;
         let mut client = ConnectionManagerClient::connect(address).await.unwrap();
-        let request = Request::new(ConnectRequest{client_id});
+        let request = Request::new(ConnectRequest{client_id, qp_idx});
         let _response = client.listen(request).await.unwrap().into_inner();
         Ok(())
     }

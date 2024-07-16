@@ -45,7 +45,7 @@ impl ConnectionManager for GrpcServer {
     ) -> Result<Response<ConnectResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let rdma_port = client.request_connection(connection_request.client_id).await;
+        let rdma_port = client.request_connection(connection_request.client_id, connection_request.qp_idx).await;
         let connection_response = ConnectResponse{
             server_port: rdma_port
         };
@@ -57,7 +57,7 @@ impl ConnectionManager for GrpcServer {
     ) -> Result<Response<ConnectResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let _rdma_port = client.listen(connection_request.client_id).await;
+        let _rdma_port = client.listen(connection_request.client_id, connection_request.qp_idx).await;
         let connection_response = ConnectResponse::default();
         Ok(Response::new(connection_response))
     }

@@ -12,9 +12,13 @@ struct Args{
     #[clap(short, long, default_value = "7471")]
     port: u16,
     #[clap(short, long, default_value = "128")]
-    msg_size: usize,
+    size: usize,
     #[clap(short, long, default_value = "5")]
     iterations: usize,
+    #[clap(short, long, default_value = "1")]
+    qps: u32,
+    #[clap(short, long, default_value = "1")]
+    messages: u32,
 }
 
 #[tokio::main]
@@ -22,17 +26,26 @@ async fn main() -> anyhow::Result<(), CustomError> {
     let args = Args::parse();
     let grpc_address = format!("http://{}:{}",args.server,args.port);
     let grpc_client = grpc_client::GrpcClient::new(grpc_address,0 );
-    let rdma_port = grpc_client.request_connection().await.unwrap();
-    let port = format!("{}\0",rdma_port);
-    let server = format!("{}\0",args.server);
-    let port = port.as_str();
-    let server = server.as_str();
     let mut rdma_client = RdmaClient::new();
-    rdma_client.connect(server,port)?;
-    grpc_client.listen().await.unwrap();
+    for qp_idx in 0..args.qps{
+        let rdma_port = grpc_client.request_connection(qp_idx).await.unwrap();
+        let port = format!("{}\0",rdma_port);
+        let server = format!("{}\0",args.server);
+        let port = port.as_str();
+        let server = server.as_str();
+        rdma_client.connect(server,port)?;
+        
+    }
+
+    for qp_idx in 0..args.qps{
+        grpc_client.listen(qp_idx).await.unwrap();
+    }
+
+
     //rdma_client.read(args.msg_size, args.iterations)?;
     //rdma_client.send(args.msg_size, args.iterations)?;
-    rdma_client.write(args.msg_size, args.iterations)?;
+    println!("Client writing");
+    rdma_client.write(args.size, args.messages, args.iterations)?;
     rdma_client.disconnect()?;
     println!("Client done");
     Ok(())

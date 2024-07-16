@@ -4,6 +4,8 @@
 pub struct ConnectRequest {
     #[prost(uint32, tag = "1")]
     pub client_id: u32,
+    #[prost(uint32, tag = "2")]
+    pub qp_idx: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
