@@ -7,6 +7,7 @@ pub mod grpc_server;
 pub mod connection_manager;
 pub mod rdma_server;
 pub mod server_manager;
+pub mod qp;
 
 #[derive(Parser)]
 struct Args{
@@ -23,7 +24,7 @@ async fn main() -> anyhow::Result<(), CustomError> {
 
     let mut jh_list = Vec::new();
 
-    let sm = ServerManager::new(args.address.clone());
+    let mut sm = ServerManager::new(args.address.clone());
     let sm_client = sm.client.clone();
     let jh = tokio::spawn(async move{
         sm.run().await;

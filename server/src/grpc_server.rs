@@ -3,8 +3,7 @@ use crate::{
     connection_manager_server::{
         ConnectionManager,
         ConnectionManagerServer
-    },
-    ConnectRequest, ConnectResponse, ListenRequest, ListenResponse
+    }, ConnectQpRequest, ListenRequest, ListenResponse, QpRequest, QpResponse, RdmaServerRequest, StatusResponse
 },
 server_manager::ServerManagerClient};
 use tonic::{transport::Server, Request, Response, Status};
@@ -39,25 +38,56 @@ impl GrpcServer {
 
 #[tonic::async_trait]
 impl ConnectionManager for GrpcServer {
-    async fn request_connection(
+    async fn create_rdma_server(
         &self,
-        request: Request<ConnectRequest>,
-    ) -> Result<Response<ConnectResponse>, Status> {
+        request: Request<RdmaServerRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let rdma_port = client.request_connection(connection_request.client_id, connection_request.qps).await;
-        let connection_response = ConnectResponse{
-            server_port: rdma_port
+        match client.create_rdma_server(connection_request.client_id).await{
+            Ok(_) => {},
+            Err(e) => {
+                return Err(Status::internal(e.to_string()));
+            }
+        }
+
+        let connection_response = StatusResponse{
+            msg: "Success".to_string()
         };
         Ok(Response::new(connection_response))
     }
-    async fn listen(
+
+    async fn create_qp(
+        &self,
+        request: Request<QpRequest>,
+    ) -> Result<Response<QpResponse>, Status> {
+        let connection_request = request.into_inner();
+        let mut client = self.server_manager_client.clone();
+        let rdma_port = client.create_qp(connection_request.client_id).await.unwrap();
+        let connection_response = QpResponse{
+            port: rdma_port as u32
+        };
+        Ok(Response::new(connection_response))
+    }
+
+    async fn request_qp_connection(
+        &self,
+        request: Request<ConnectQpRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        let connection_request = request.into_inner();
+        let mut client = self.server_manager_client.clone();
+        let _rdma_port = client.connect_qp(connection_request.client_id, connection_request.port as u16).await;
+        let connection_response = StatusResponse::default();
+        Ok(Response::new(connection_response))
+    }
+
+    async fn qp_listen(
         &self,
         request: Request<ListenRequest>,
     ) -> Result<Response<ListenResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let _rdma_port = client.listen(connection_request.client_id, connection_request.qp_idx).await;
+        let _rdma_port = client.listen(connection_request.client_id, connection_request.port as u16).await;
         let connection_response = ListenResponse::default();
         Ok(Response::new(connection_response))
     }

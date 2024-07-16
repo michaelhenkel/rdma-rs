@@ -144,6 +144,16 @@ impl Id{
     }
 }
 
+#[derive(Clone)]
+pub struct ProtectionDomain(pub *mut ibv_pd);
+unsafe impl Send for ProtectionDomain{}
+unsafe impl Sync for ProtectionDomain{}
+impl ProtectionDomain{
+    pub fn pd(&self) -> *mut ibv_pd{
+        self.0
+    }
+}
+
 pub struct Address(pub *mut c_void);
 unsafe impl Send for Address{}
 unsafe impl Sync for Address{}
@@ -162,6 +172,7 @@ impl Mr{
     }
 }
 
+#[derive(Clone)]
 pub struct InitAttr(pub ibv_qp_init_attr);
 unsafe impl Send for InitAttr{}
 unsafe impl Sync for InitAttr{}

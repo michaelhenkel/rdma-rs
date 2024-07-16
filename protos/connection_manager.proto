@@ -3,13 +3,31 @@ syntax = "proto3";
 package connection_manager;
 
 service ConnectionManager {
-    rpc RequestConnection (ConnectRequest) returns (ConnectResponse);
-    rpc Listen (ListenRequest) returns (ListenResponse);
+    rpc CreateRdmaServer (RdmaServerRequest) returns (StatusResponse);
+    rpc CreateQp (QpRequest) returns (QpResponse);
+    rpc RequestQpConnection (ConnectQpRequest) returns (StatusResponse);
+    rpc QpListen (ListenRequest) returns (ListenResponse);
 }
 
-message ConnectRequest {
+message ConnectQpRequest {
     uint32 client_id = 1;
-    uint32 qps = 2;
+    uint32 port = 2;
+}
+
+message QpRequest{
+    uint32 client_id = 1;
+}
+
+message QpResponse{
+    uint32 port = 1;
+}
+
+message RdmaServerRequest {
+    uint32 client_id = 1;
+}
+
+message StatusResponse{
+    string msg = 1;
 }
 
 message ConnectResponse {
@@ -18,21 +36,9 @@ message ConnectResponse {
 
 message ListenRequest {
     uint32 client_id = 1;
-    uint32 qp_idx = 2;
+    uint32 port = 2;
 }
 
 message ListenResponse {
     string msg = 1;
-}
-
-message ClientCommand {
-    oneof command {
-        ConnectRequest connect_request = 1;
-    }
-}
-
-message ServerReply {
-    oneof reply {
-        ConnectResponse connect_response = 1;
-    }
 }

@@ -14,7 +14,7 @@ impl RdmaClient{
         }
     }
 
-    pub fn connect(&mut self, ip: &str, port: &str) -> anyhow::Result<(), CustomError>{
+    pub fn connect(&mut self, ip: &str, port: &str, pd: &mut Option<ProtectionDomain>) -> anyhow::Result<(), CustomError>{
         let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
         let mut res: *mut rdma_addrinfo = null_mut();
     
@@ -35,7 +35,12 @@ impl RdmaClient{
         attr.cap.max_inline_data = 64;
         attr.qp_context = id.cast();
         attr.sq_sig_all = 0;
-        let ret = unsafe { rdma_create_ep(&mut id, res, null_mut(), &mut attr) };
+
+        if pd.is_none(){
+            *pd = Some(ProtectionDomain(null_mut()));
+        }
+
+        let ret = unsafe { rdma_create_ep(&mut id, res, pd.as_ref().unwrap().pd(), &mut attr) };
         if ret != 0 {
             unsafe { rdma_freeaddrinfo(res); }
             return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
