@@ -22,28 +22,34 @@ impl ServerManager{
 
     pub async fn run(self){
         let mut rx = self.rx.write().await;
-        let mut client_map = HashMap::new();
+        let rdma_server = RdmaServer::new();
+        let rdma_server_client = rdma_server.client.clone();
+        tokio::spawn(async move{
+            rdma_server.run().await.unwrap();
+        });
         while let Some(server_manager_command) = rx.recv().await{
             let address = self.address.clone();
             match server_manager_command{
-                ServerManagerCommand::ConnectionRequest{client_id, qp_idx, tx} => {
-                    let port = portpicker::pick_unused_port().unwrap();
-                    let rdma_server = RdmaServer::new();
-                    let rdma_server_client = rdma_server.client.clone();
-                    tokio::spawn(async move{
-                        rdma_server.run().await.unwrap();
-                    });
-                    let rdma_server_client_clone_1 = rdma_server_client.clone();
-                    let rdma_server_client_clone_2 = rdma_server_client.clone();
+                ServerManagerCommand::ConnectionRequest{client_id, qps, tx} => {
+
+                    let mut ports = Vec::new();
+                    for _ in 0..qps{
+                        let port = portpicker::pick_unused_port().unwrap();
+                        ports.push(port as u32);
+                    }
+                    let address = address.clone();
+
+
+                    let rdma_server_client = rdma_server_client.clone();
+                    let ports_u16 = ports.iter().map(|x| *x as u16).collect();
                     tokio::spawn(async move{
                         //rdma_server.clone().listen(address.clone(), port).await.unwrap();
-                        rdma_server_client_clone_1.clone().connect(address.clone(), port).await.unwrap();
+                        rdma_server_client.clone().connect(address.clone(), ports_u16).await.unwrap();
                     });
-                    client_map.insert((client_id, qp_idx), rdma_server_client_clone_2);
-                    tx.send(port as u32).unwrap();
+                    tx.send(ports).unwrap();
                 },
                 ServerManagerCommand::Listen{client_id, qp_idx, tx} => {
-                    let rdma_server_client = client_map.get(&(client_id, qp_idx)).unwrap();
+                    //let rdma_server_client = client_map.get(&(client_id, qp_idx)).unwrap();
                     let mut rdma_server_client = rdma_server_client.clone();
                     tokio::spawn(async move{
                         rdma_server_client.listen().await.unwrap();
@@ -66,9 +72,9 @@ impl ServerManagerClient{
             tx
         }
     }
-    pub async fn request_connection(&mut self, client_id: u32, qp_idx: u32) -> u32{
+    pub async fn request_connection(&mut self, client_id: u32, qps: u32) -> Vec<u32>{
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(ServerManagerCommand::ConnectionRequest{client_id, qp_idx, tx}).await.unwrap();
+        self.tx.send(ServerManagerCommand::ConnectionRequest{client_id, qps, tx}).await.unwrap();
         rx.await.unwrap()
     }
     pub async fn listen(&mut self, client_id: u32, qp_idx: u32) -> anyhow::Result<()>{
@@ -82,8 +88,8 @@ impl ServerManagerClient{
 pub enum ServerManagerCommand{
     ConnectionRequest{
         client_id: u32,
-        qp_idx: u32,
-        tx: tokio::sync::oneshot::Sender<u32>
+        qps: u32,
+        tx: tokio::sync::oneshot::Sender<Vec<u32>>
     },
     Listen{
         client_id: u32,

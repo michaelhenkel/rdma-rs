@@ -5,13 +5,27 @@ pub struct ConnectRequest {
     #[prost(uint32, tag = "1")]
     pub client_id: u32,
     #[prost(uint32, tag = "2")]
-    pub qp_idx: u32,
+    pub qps: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectResponse {
+    #[prost(uint32, repeated, tag = "1")]
+    pub server_port: ::prost::alloc::vec::Vec<u32>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListenRequest {
     #[prost(uint32, tag = "1")]
-    pub server_port: u32,
+    pub client_id: u32,
+    #[prost(uint32, tag = "2")]
+    pub qp_idx: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListenResponse {
+    #[prost(string, tag = "1")]
+    pub msg: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -160,11 +174,8 @@ pub mod connection_manager_client {
         }
         pub async fn listen(
             &mut self,
-            request: impl tonic::IntoRequest<super::ConnectRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ConnectResponse>,
-            tonic::Status,
-        > {
+            request: impl tonic::IntoRequest<super::ListenRequest>,
+        ) -> std::result::Result<tonic::Response<super::ListenResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
@@ -200,8 +211,8 @@ pub mod connection_manager_server {
         ) -> std::result::Result<tonic::Response<super::ConnectResponse>, tonic::Status>;
         async fn listen(
             &self,
-            request: tonic::Request<super::ConnectRequest>,
-        ) -> std::result::Result<tonic::Response<super::ConnectResponse>, tonic::Status>;
+            request: tonic::Request<super::ListenRequest>,
+        ) -> std::result::Result<tonic::Response<super::ListenResponse>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct ConnectionManagerServer<T: ConnectionManager> {
@@ -337,16 +348,16 @@ pub mod connection_manager_server {
                     struct ListenSvc<T: ConnectionManager>(pub Arc<T>);
                     impl<
                         T: ConnectionManager,
-                    > tonic::server::UnaryService<super::ConnectRequest>
+                    > tonic::server::UnaryService<super::ListenRequest>
                     for ListenSvc<T> {
-                        type Response = super::ConnectResponse;
+                        type Response = super::ListenResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ConnectRequest>,
+                            request: tonic::Request<super::ListenRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {

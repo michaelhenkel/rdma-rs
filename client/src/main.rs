@@ -27,14 +27,15 @@ async fn main() -> anyhow::Result<(), CustomError> {
     let grpc_address = format!("http://{}:{}",args.server,args.port);
     let grpc_client = grpc_client::GrpcClient::new(grpc_address,0 );
     let mut rdma_client = RdmaClient::new();
-    for qp_idx in 0..args.qps{
-        let rdma_port = grpc_client.request_connection(qp_idx).await.unwrap();
+    let rdma_ports = grpc_client.request_connection(args.qps).await.unwrap();
+
+    for rdma_port in rdma_ports{
         let port = format!("{}\0",rdma_port);
         let server = format!("{}\0",args.server);
         let port = port.as_str();
         let server = server.as_str();
+        println!("Connecting to {}:{}",server,rdma_port);
         rdma_client.connect(server,port)?;
-        
     }
 
     for qp_idx in 0..args.qps{

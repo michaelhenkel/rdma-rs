@@ -21,135 +21,138 @@ impl RdmaServer{
     }
     pub async fn run(&self) -> anyhow::Result<()>{
         let mut rx = self.rx.write().await;
-        let my_id = Arc::new(Mutex::new(Id(null_mut())));
+        //let my_id = Arc::new(Mutex::new(Id(null_mut())));
+        let mut my_ids: Vec<Id> = Vec::new();
         while let Some(rdma_server_command) = rx.recv().await{
             let rdma_server = self.clone();
             match rdma_server_command{
                 RdmaServerCommand::Listen{tx} => {
-                    let my_id = my_id.clone();
+                    let my_ids = my_ids.clone();
                     tokio::spawn(async move{
-                        loop {
-                            let ret = rdma_server.listen(my_id.clone()).await.unwrap();
-                            if ret == 0 {
-                                break;
+                        for id in my_ids{
+                            let id = id.clone();
+                            loop {
+                                let ret = rdma_server.listen(id.clone()).await.unwrap();
+                                if ret == 0 {
+                                    break;
+                                }
                             }
                         }
                         tx.send(()).unwrap();
                     });
                 },
-                RdmaServerCommand::Connect{address, port} => {
-                    let id = rdma_server.connect(address, port).await.unwrap();
-                    let mut my_id = my_id.lock().unwrap();
-                    *my_id = id;
+                RdmaServerCommand::Connect{address, ports} => {
+                    let ids = rdma_server.connect(address, ports).await.unwrap();
+                    for id in ids{
+                        my_ids.push(id);
+                    }
+                    //let mut my_id = my_id.lock().unwrap();
+                    //*my_id = id;
                 }
             }
         }
         println!("rdma server stopped");
         Ok(())
     }
-    pub async fn connect(self, address: String, port: u16) -> anyhow::Result<Id, CustomError>{
-        let port = format!("{}\0",port);
+    pub async fn connect(self, address: String, ports: Vec<u16>) -> anyhow::Result<Vec<Id>, CustomError>{
         let address = format!("{}\0",address);
-        let port = port.as_str();
-        let address = address.as_str();
-        let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
-        let mut res: *mut rdma_addrinfo = null_mut();
-        hints.ai_flags = RAI_PASSIVE.try_into().unwrap();
-        hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.try_into().unwrap();
-        let ret = unsafe {
-            rdma_getaddrinfo(
-                address.as_ptr().cast(),
-                port.as_ptr().cast(),
-                &hints,
-                &mut res,
-            )
-        };
-        if ret != 0 {
-            return Err(CustomError::new("rdma_getaddrinfo".to_string(), ret).into());
+        let mut ids = Vec::new();
+        for port in ports {
+            let port = format!("{}\0",port);
+            let port = port.as_str();
+            let address = address.as_str();
+            println!("setting up connection to {}:{}",address,port);
+            let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+            let mut res: *mut rdma_addrinfo = null_mut();
+            hints.ai_flags = RAI_PASSIVE.try_into().unwrap();
+            hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.try_into().unwrap();
+            let ret = unsafe {
+                rdma_getaddrinfo(
+                    address.as_ptr().cast(),
+                    port.as_ptr().cast(),
+                    &hints,
+                    &mut res,
+                )
+            };
+            if ret != 0 {
+                return Err(CustomError::new("rdma_getaddrinfo".to_string(), ret).into());
+            }
+            let mut listen_id = null_mut();
+            let id = null_mut();
+        
+            let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+            init_attr.cap.max_send_wr = 4096;
+            init_attr.cap.max_recv_wr = 4096;
+            init_attr.cap.max_send_sge = 1;
+            init_attr.cap.max_recv_sge = 1;
+            init_attr.cap.max_inline_data = 64;
+            init_attr.sq_sig_all = 1;
+            let ret = unsafe { rdma_create_ep(&mut listen_id, res, null_mut(), &mut init_attr) };
+            if ret != 0 {
+                unsafe { rdma_freeaddrinfo(res); }
+                return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
+            }
+            let init_attr = InitAttr(init_attr);
+            let listen_id = Id(listen_id);
+            let id = Id(id);
+            let id_clone = id.clone();
+            tokio::spawn(async move{
+                RdmaServer::wait_for_connection(listen_id, id_clone, init_attr).await.unwrap();
+            });
+            ids.push(id);
         }
-        let mut listen_id = null_mut();
-        let mut id = null_mut();
-    
-        let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
-        init_attr.cap.max_send_wr = 4096;
-        init_attr.cap.max_recv_wr = 4096;
-        init_attr.cap.max_send_sge = 1;
-        init_attr.cap.max_recv_sge = 1;
-        init_attr.cap.max_inline_data = 64;
-        init_attr.sq_sig_all = 1;
-        let ret = unsafe { rdma_create_ep(&mut listen_id, res, null_mut(), &mut init_attr) };
-        if ret != 0 {
-            unsafe { rdma_freeaddrinfo(res); }
-            return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
-        }
+        Ok(ids)
+    }
+
+    async fn wait_for_connection(listen_id: Id, id: Id, init_attr: InitAttr) -> anyhow::Result<(), CustomError> {
         println!("Waiting for connection");
-        let ret = unsafe { rdma_listen(listen_id, 0) };
+        let mut init_attr = init_attr.init_attr();
+        let ret = unsafe { rdma_listen(listen_id.id(), 0) };
         if ret != 0 {
-            unsafe { rdma_destroy_ep(listen_id); }
+            unsafe { rdma_destroy_ep(listen_id.id()); }
             return Err(CustomError::new("rdma_listen".to_string(), ret).into());
         }
         
-        let ret = unsafe { rdma_get_request(listen_id, &mut id) };
+        let ret = unsafe { rdma_get_request(listen_id.id(), &mut id.id()) };
         if ret != 0 {
-            unsafe { rdma_destroy_ep(listen_id); }
+            unsafe { rdma_destroy_ep(listen_id.id()); }
             return Err(CustomError::new("rdma_get_request".to_string(), ret).into());
         }
         println!("Connection received, accepting it");
-        let ret = unsafe { rdma_accept(id, null_mut()) };
+        //if id.id().is_null() {
+        //    return Err(CustomError::new("id is null".to_string(), ret).into());
+        //}
+        let ret = unsafe { rdma_accept(id.id(), null_mut()) };
         if ret != 0 {
             return Err(CustomError::new("rdma_accept".to_string(), ret).into());
         }
-
+        println!("Connection accepted");
         let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         let ret = unsafe {
             ibv_query_qp(
-                (*id).qp,
+                (*id.id()).qp,
                 &mut qp_attr,
                 ibv_qp_attr_mask::IBV_QP_CAP.0.try_into().unwrap(),
                 &mut init_attr,
             )
         };
         if ret != 0 {
-            unsafe { rdma_destroy_ep(id); }
+            unsafe { rdma_destroy_ep(id.id()); }
             return Err(CustomError::new("ibv_query_qp".to_string(), ret).into());
         }
         qp_attr.timeout = 14;
-        unsafe { ibv_modify_qp((*id).qp, &mut qp_attr, ibv_qp_attr_mask::IBV_QP_TIMEOUT.0 as i32) };
-        if id.is_null() {
+        unsafe { ibv_modify_qp((*id.id()).qp, &mut qp_attr, ibv_qp_attr_mask::IBV_QP_TIMEOUT.0 as i32) };
+        if id.id().is_null() {
             return Err(CustomError::new("rdma_get_request".to_string(), ret).into());
         }
-        Ok(Id(id))
+        Ok(())
     }
-    pub async fn listen(&self, my_id: Arc<Mutex<Id>>) -> anyhow::Result<u8, CustomError> {
+
+    pub async fn listen(&self, id: Id) -> anyhow::Result<u8, CustomError> {
         println!("Listening");
-        let my_id_clone = my_id.clone();
-        let my_id_lock = my_id_clone.lock().unwrap();
-        let id = Id(my_id_lock.0);
-        /* 
-        let recv_cq = unsafe { (*id).recv_cq };
-        if !recv_cq.is_null(){
-            println!("recv cq: {}", unsafe { (*recv_cq).cqe });
-            let ret = unsafe { ibv_resize_cq(recv_cq, 65535)};
-            if ret != 0 {
-                return Err(CustomError::new("ibv_resize_cq".to_string(), ret).into());
-            }
-            println!("recv cq: {}", unsafe { (*recv_cq).cqe });
-        } else {
-            println!("recv cq is null");
-        }
-        let send_cq = unsafe { (*id).send_cq };
-        if !send_cq.is_null(){
-            println!("send cq: {}", unsafe { (*send_cq).cqe });
-            let ret = unsafe { ibv_resize_cq(send_cq, 65535)};
-            if ret != 0 {
-                return Err(CustomError::new("ibv_resize_cq".to_string(), ret).into());
-            }
-            println!("send cq: {}", unsafe { (*send_cq).cqe });
-        } else {
-            println!("send cq is null");
-        }
-        */
-        
+        //let my_id_clone = my_id.clone();
+        //let my_id_lock = my_id_clone.lock().unwrap();
+        //let id = Id(my_id_lock.0);        
         let mut metadata_request = MetaData::default();
         let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
         println!("waiting for metadata request");
@@ -212,8 +215,8 @@ impl RdmaServerClient{
         rx.await.unwrap();
         Ok(())
     }
-    pub async fn connect(&mut self, address: String, port: u16) -> anyhow::Result<()>{
-        match self.tx.send(RdmaServerCommand::Connect{address, port}).await{
+    pub async fn connect(&mut self, address: String, ports: Vec<u16>) -> anyhow::Result<()>{
+        match self.tx.send(RdmaServerCommand::Connect{address, ports}).await{
             Ok(_) => {},
             Err(e) => {
                 println!("error: {}",e);
@@ -231,6 +234,6 @@ pub enum RdmaServerCommand{
     },
     Connect{
         address: String,
-        port: u16,
+        ports: Vec<u16>,
     }
 }

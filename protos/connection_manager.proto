@@ -4,16 +4,25 @@ package connection_manager;
 
 service ConnectionManager {
     rpc RequestConnection (ConnectRequest) returns (ConnectResponse);
-    rpc Listen (ConnectRequest) returns (ConnectResponse);
+    rpc Listen (ListenRequest) returns (ListenResponse);
 }
 
 message ConnectRequest {
     uint32 client_id = 1;
-    uint32 qp_idx = 2;
+    uint32 qps = 2;
 }
 
 message ConnectResponse {
-    uint32 server_port = 1;
+    repeated uint32 server_port = 1;
+}
+
+message ListenRequest {
+    uint32 client_id = 1;
+    uint32 qp_idx = 2;
+}
+
+message ListenResponse {
+    string msg = 1;
 }
 
 message ClientCommand {

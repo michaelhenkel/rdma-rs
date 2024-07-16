@@ -4,7 +4,7 @@ use crate::{
         ConnectionManager,
         ConnectionManagerServer
     },
-    ConnectRequest, ConnectResponse
+    ConnectRequest, ConnectResponse, ListenRequest, ListenResponse
 },
 server_manager::ServerManagerClient};
 use tonic::{transport::Server, Request, Response, Status};
@@ -45,7 +45,7 @@ impl ConnectionManager for GrpcServer {
     ) -> Result<Response<ConnectResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let rdma_port = client.request_connection(connection_request.client_id, connection_request.qp_idx).await;
+        let rdma_port = client.request_connection(connection_request.client_id, connection_request.qps).await;
         let connection_response = ConnectResponse{
             server_port: rdma_port
         };
@@ -53,12 +53,12 @@ impl ConnectionManager for GrpcServer {
     }
     async fn listen(
         &self,
-        request: Request<ConnectRequest>,
-    ) -> Result<Response<ConnectResponse>, Status> {
+        request: Request<ListenRequest>,
+    ) -> Result<Response<ListenResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
         let _rdma_port = client.listen(connection_request.client_id, connection_request.qp_idx).await;
-        let connection_response = ConnectResponse::default();
+        let connection_response = ListenResponse::default();
         Ok(Response::new(connection_response))
     }
 

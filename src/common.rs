@@ -162,6 +162,15 @@ impl Mr{
     }
 }
 
+pub struct InitAttr(pub ibv_qp_init_attr);
+unsafe impl Send for InitAttr{}
+unsafe impl Sync for InitAttr{}
+impl InitAttr{
+    pub fn init_attr(&self) -> ibv_qp_init_attr{
+        self.0
+    }
+}
+
 pub fn process_rdma_cm_event(echannel: *mut rdma_event_channel, expected_event: rdma_cm_event_type::Type, rdma_event: *mut *mut rdma_cm_event) -> anyhow::Result<(), CustomError> {
     let res = unsafe { rdma_get_cm_event(echannel, rdma_event) };
     if res != 0 {
