@@ -320,7 +320,7 @@ pub trait MrObject{
         }
         Ok(())
     }
-    fn rdma_write(&mut self, id: &Id, rkey: u32, remote_addr: u64, iterations: usize) -> anyhow::Result<(), CustomError>{
+    fn rdma_write(&mut self, id: &Id, mr_addr: &mut MrAddr, rkey: u32, remote_addr: u64, iterations: usize, offset: usize, msg_len: usize) -> anyhow::Result<(), CustomError>{
         let mut flags = 0;
         let mut ret;
         let mut comp = false;
@@ -329,13 +329,15 @@ pub trait MrObject{
                 flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0 | ibv_send_flags::IBV_SEND_SIGNALED.0;
                 comp = true;
             }
+            let addr = self.addr().wrapping_add(offset);
+            let remote_addr = remote_addr.wrapping_add(offset as u64);
             ret = unsafe {
                 rdma_post_write(
                     id.0,
                     null_mut(),
-                    self.addr(),
-                    self.len(),
-                    self.mr(),
+                    addr,
+                    msg_len,
+                    mr_addr.mr,
                     flags as i32,
                     remote_addr,
                     rkey
@@ -450,6 +452,30 @@ pub trait MrObject{
     }
 }
 
+pub fn register_mr(id: &Id, obj: &mut dyn MrObject, operation: Operation) -> anyhow::Result<MrAddr, CustomError>{
+    if id.id().is_null(){
+        return Err(CustomError::new("id is null".to_string(), -1).into());
+    }
+    let length = obj.len();
+    let addr: *mut c_void = obj.addr();
+    let mr = match operation{
+        Operation::SendRecv => {
+            unsafe { rdma_reg_msgs(id.id(), addr, length) }
+        },
+        Operation::Write => {
+            unsafe { rdma_reg_write(id.id(), addr, length) }
+        },
+        Operation::Read => {
+            unsafe { rdma_reg_read(id.id(), addr, length) }
+        }
+    };
+    if mr.is_null() {
+        unsafe { rdma_dereg_mr(mr); }
+        return Err(CustomError::new("rdma_reg_msgs".to_string(), -1).into());
+    }
+    Ok(MrAddr{mr, addr})
+}
+
 
 
 pub enum Operation{
@@ -462,7 +488,7 @@ pub enum Operation{
 pub struct MetaData{
     pub request_type: u8,
     pub remote_address: u64,
-    pub message_size: u32,
+    pub message_size: u64,
     pub rkey: u32,
     pub lkey: u32,
     pub iterations: u32,
@@ -559,7 +585,7 @@ impl MetaData{
             },
         }
     }
-    pub fn set_message_size(&mut self, length: u32){
+    pub fn set_message_size(&mut self, length: u64){
         let metadata_buffer: *mut MetaData = self.addr() as *const _ as *mut MetaData;
         unsafe { (*metadata_buffer).message_size = length };
         self.message_size = length;
@@ -585,7 +611,7 @@ impl MetaData{
     pub fn remote_address(&self) -> u64{
         self.remote_address
     }
-    pub fn message_size(&self) -> u32{
+    pub fn message_size(&self) -> u64{
         self.message_size
     }
     pub fn iterations(&self) -> u32{

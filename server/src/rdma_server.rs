@@ -66,51 +66,6 @@ impl RdmaServer{
         println!("rdma server stopped");
         Ok(())
     }
-    pub async fn listen(&self, id: Id) -> anyhow::Result<u8, CustomError> {
-        println!("Listening");
-        let mut metadata_request = MetaData::default();
-        let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
-        println!("waiting for metadata request");
-        metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
-        println!("{:?}", metadata_request.get_request_type());
-        match metadata_request.get_request_type(){
-            MetaDataRequestTypes::WriteRequest => {
-                let mut data = Data::new(metadata_request.message_size() as usize);
-                data.create_and_register_mr(&id, Operation::Write)?;
-                metadata_request.set_request_type(MetaDataRequestTypes::WriteResponse);
-                metadata_request.set_remote_address(data.mr_addr());
-                metadata_request.set_rkey(data.mr_rkey());
-                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
-                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
-                return Ok(metadata_request.get_request_type() as u8);
-            },
-            MetaDataRequestTypes::SendRequest => {
-                let mut data = Data::new(metadata_request.message_size() as usize);
-                let data_mr_addr = data.create_and_register_mr(&id, Operation::SendRecv)?;
-                metadata_request.set_request_type(MetaDataRequestTypes::SendResponse);
-                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
-                data.rdma_recv_data(&id, &data_mr_addr, metadata_request.iterations() as usize)?;
-                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
-                return Ok(metadata_request.get_request_type() as u8);
-            },
-            MetaDataRequestTypes::ReadRequest => {
-                let mut data = Data::new(metadata_request.message_size() as usize);
-                data.create_and_register_mr(&id, Operation::Read)?;
-                metadata_request.set_request_type(MetaDataRequestTypes::ReadResponse);
-                metadata_request.set_remote_address(data.mr_addr());
-                metadata_request.set_rkey(data.mr_rkey());
-                metadata_request.rdma_send(&id, &metadata_mr_addr)?;
-                metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
-                return Ok(metadata_request.get_request_type() as u8);
-            },
-            MetaDataRequestTypes::Disconnect => {
-                return Ok(0);
-            },
-            _ => {
-                return Ok(0);
-            }
-        }
-    }
 }
 
 #[derive(Clone)]

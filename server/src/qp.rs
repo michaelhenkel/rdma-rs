@@ -1,5 +1,5 @@
 use std::ptr::null_mut;
-use common::{CustomError, Data, Id, InitAttr, MetaData, MetaDataRequestTypes, MrObject, Operation, ProtectionDomain};
+use common::{CustomError, Data, Id, InitAttr, MetaData, MetaDataRequestTypes, MrAddr, MrObject, Operation, ProtectionDomain};
 use rdma_sys::*;
 #[derive(Clone)]
 pub struct Qp{
@@ -108,16 +108,27 @@ impl Qp{
         let id = self.id.clone();     
         let mut metadata_request = MetaData::default();
         let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
+        let mut data = None;
         println!("waiting for metadata request");
         metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
         println!("{:?}", metadata_request.get_request_type());
         match metadata_request.get_request_type(){
             MetaDataRequestTypes::WriteRequest => {
-                let mut data = Data::new(metadata_request.message_size() as usize);
-                data.create_and_register_mr(&id, Operation::Write)?;
+
+                if data.is_none(){
+                    data = Some(Data::new(metadata_request.message_size() as usize));
+                }
+
+                let mr = unsafe { rdma_reg_write(id.id(), data.as_mut().unwrap().addr(), data.as_ref().unwrap().len()) };
+                if mr.is_null(){
+                    return Err(CustomError::new("rdma_reg_write".to_string(), -1).into());
+                }
+                let mr_addr = unsafe { (*mr).addr as u64 };
+                let mr_rkey = unsafe { (*mr).rkey as u32 };
+   
                 metadata_request.set_request_type(MetaDataRequestTypes::WriteResponse);
-                metadata_request.set_remote_address(data.mr_addr());
-                metadata_request.set_rkey(data.mr_rkey());
+                metadata_request.set_remote_address(mr_addr);
+                metadata_request.set_rkey(mr_rkey);
                 metadata_request.rdma_send(&id, &metadata_mr_addr)?;
                 metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
                 return Ok(metadata_request.get_request_type() as u8);
