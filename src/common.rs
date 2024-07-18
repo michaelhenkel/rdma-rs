@@ -2,7 +2,7 @@ use std::{fmt::Display, ptr::{self, null_mut}};
 use libc::{c_int, c_void};
 use rdma_sys::*;
 
-const BATCH_SIZE: usize = 10;
+const BATCH_SIZE: usize = 2000;
 
 #[derive(Debug)]
 pub struct CustomError{
@@ -320,40 +320,46 @@ pub trait MrObject{
         }
         Ok(())
     }
-    fn rdma_write(&mut self, id: &Id, mr_addr: &mut MrAddr, rkey: u32, remote_addr: u64, iterations: usize, offset: usize, msg_len: usize) -> anyhow::Result<(), CustomError>{
+    fn rdma_write(
+        &mut self,
+        id: &Id,
+        mr_addr: &mut MrAddr,
+        rkey: u32,
+        remote_addr: u64,
+        offset: usize,
+        msg_len: usize,
+        messages_per_qp: u64,
+        msg_qp_idx: u64
+    ) -> anyhow::Result<(), CustomError>{
         let mut flags = 0;
-        let mut ret;
         let mut comp = false;
-        for i in 1..iterations+1{
-            if i == iterations || i % BATCH_SIZE == 0{
-                flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0 | ibv_send_flags::IBV_SEND_SIGNALED.0;
-                comp = true;
-            }
-            let addr = self.addr().wrapping_add(offset);
-            let remote_addr = remote_addr.wrapping_add(offset as u64);
-            ret = unsafe {
-                rdma_post_write(
-                    id.0,
-                    null_mut(),
-                    addr,
-                    msg_len,
-                    mr_addr.mr,
-                    flags as i32,
-                    remote_addr,
-                    rkey
-                )
-            };
-            if ret != 0 {
-                unsafe { rdma_disconnect(id.0) };
-                return Err(CustomError::new("rdma_post_write".to_string(), ret).into());
-            }
-            
-            if comp{
-                let _ret = unsafe { send_complete(id.clone(), 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE)? };
-                comp = false;
-                flags = 0;
-            }
+        if msg_qp_idx == messages_per_qp || msg_qp_idx as usize % BATCH_SIZE == 0{
+            flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0 | ibv_send_flags::IBV_SEND_SIGNALED.0;
+            comp = true;
         }
+        let addr = self.addr().wrapping_add(offset);
+        let remote_addr = remote_addr.wrapping_add(offset as u64);
+        let ret = unsafe {
+            rdma_post_write(
+                id.0,
+                null_mut(),
+                addr,
+                msg_len,
+                mr_addr.mr,
+                flags as i32,
+                remote_addr,
+                rkey
+            )
+        };
+        if ret != 0 {
+            unsafe { rdma_disconnect(id.0) };
+            return Err(CustomError::new("rdma_post_write".to_string(), ret).into());
+        }
+        
+        if comp{
+            let _ret = unsafe { send_complete(id.clone(), 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE)? };
+        }
+        
         Ok(())
     }
     fn rdma_read(&mut self, id: &Id, rkey: u32, remote_addr: u64, iterations: usize) -> anyhow::Result<(), CustomError>{

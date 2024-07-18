@@ -66,16 +66,15 @@ impl RdmaClient{
         Ok(())
     }
 
-    pub fn write(&self, message_size: usize, iterations: usize, volume: u64) -> anyhow::Result<(), CustomError> {
+    pub fn write(&self, message_size: u64, volume: u64, iterations: usize) -> anyhow::Result<(), CustomError> {
 
-        let messages = volume/(message_size as u64);
-        let remaining_bytes = volume % (message_size as u64);
+        let messages = volume/message_size;
+        let remaining_bytes = volume % message_size;
 
-
-
-        let mut id_data_map = HashMap::new();
-        let mut metadata_mr_map = HashMap::new();
         let qps_to_use = if messages > self.id.len() as u64 { self.id.len() as u64 } else { messages };
+        let messages_per_qp = messages / qps_to_use;
+        let mut data_list = Vec::with_capacity(qps_to_use as usize);
+        let mut metadata_mr_map = HashMap::new();
         let mut data = Data::new(volume as usize);
         let data_addr = data.addr();
         let data_len = data.len();
@@ -104,26 +103,38 @@ impl RdmaClient{
             if remote_address.is_none(){
                 remote_address = Some(metadata_request.remote_address());
             }
-            
-
             let mr = unsafe { rdma_reg_write(id.id(), data_addr, data_len) };
             if mr.is_null(){
                 return Err(CustomError::new("rdma_reg_write".to_string(), -1).into());
             }
             let mr_addr = MrAddr{mr, addr: data_addr};
-            id_data_map.insert(qp_idx, (mr_addr, id.clone(), metadata_request));
+            data_list.push((mr_addr, id.clone(), metadata_request));
             metadata_mr_map.insert(qp_idx, metadata_mr_addr);
         }
-
-        for msg in 0..messages{
-            let qp_idx = msg % qps_to_use;
-            let (mr_addr, id, metadata_request) = id_data_map.get_mut(&qp_idx).unwrap();
-            let offset = msg * (message_size as u64);
-            data.rdma_write(id, mr_addr, metadata_request.rkey(), metadata_request.remote_address(), iterations, offset as usize, message_size)?;
+        for _ in 0..iterations{
+            let mut msg_qp_idx = 0;
+            for msg in 0..messages{
+                let qp_idx = msg % qps_to_use;
+                if qp_idx == 0 {
+                    msg_qp_idx += 1;
+                }
+                let (mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
+                //let (ref mut mr_addr, id, metadata_request) = &mut data_list[qp_idx as usize];
+                let offset = msg * (message_size as u64);
+                data.rdma_write(
+                    &id,
+                    mr_addr,
+                    metadata_request.rkey(),
+                    metadata_request.remote_address(),
+                    offset as usize,
+                    message_size as usize,
+                    messages_per_qp,
+                    msg_qp_idx
+                )?;
+            }
         }
-
         for qp_idx in 0..qps_to_use{
-            let (_data, id, ref mut metadata_request) = id_data_map.get_mut(&qp_idx).unwrap();
+            let (_mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
             let metadata_mr_addr = metadata_mr_map.get(&qp_idx).unwrap();
             metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
             metadata_request.rdma_send(&id, &metadata_mr_addr)?;

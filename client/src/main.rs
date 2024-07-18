@@ -13,8 +13,8 @@ struct Args{
     server: String,
     #[clap(short, long, default_value = "7471")]
     port: u16,
-    #[clap(long, default_value = "128")]
-    size: usize,
+    #[clap(short, long, default_value = "65536B")]
+    msg_size: String,
     #[clap(short, long, default_value = "5")]
     iterations: usize,
     #[clap(short, long, default_value = "1")]
@@ -28,6 +28,8 @@ async fn main() -> anyhow::Result<(), CustomError> {
     let args = Args::parse();
     let volume = byte_unit::Byte::from_str(args.volume.as_str()).map_err(|_| CustomError::new("wrong byte unit".to_string(), -1))?;
     let volume = volume.as_u64();
+    let msg_size = byte_unit::Byte::from_str(args.msg_size.as_str()).map_err(|_| CustomError::new("wrong byte unit".to_string(), -1))?;
+    let msg_size = msg_size.as_u64();
     let grpc_address = format!("http://{}:{}",args.server,args.port);
     let grpc_client = grpc_client::GrpcClient::new(grpc_address,0 );
     let mut rdma_client = RdmaClient::new();
@@ -59,7 +61,7 @@ async fn main() -> anyhow::Result<(), CustomError> {
     //rdma_client.read(args.msg_size, args.iterations)?;
     //rdma_client.send(args.msg_size, args.iterations)?;
     println!("Client writing");
-    rdma_client.write(args.size, args.iterations, volume)?;
+    rdma_client.write(msg_size, volume, args.iterations)?;
     rdma_client.disconnect()?;
     println!("Client done");
     Ok(())
