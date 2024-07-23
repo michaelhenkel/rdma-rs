@@ -154,6 +154,10 @@ impl Qp{
             MetaDataRequestTypes::Disconnect => {
                 return Ok(0);
             },
+            MetaDataRequestTypes::WriteFinished => {
+                println!("Write finished");
+                return Ok(0);
+            },
             _ => {
                 return Ok(0);
             }

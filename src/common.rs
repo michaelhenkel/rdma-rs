@@ -184,6 +184,28 @@ impl InitAttr{
     }
 }
 
+pub struct IdWr{
+    pub id: Id,
+    pub wr_list: Vec<ibv_send_wr>,
+}
+
+impl IdWr{
+    pub fn new(id: Id) -> IdWr{
+        IdWr{
+            id,
+            wr_list: Vec::new(),
+        }
+    }
+    pub fn add_wr(&mut self, wr: ibv_send_wr){
+        self.wr_list.push(wr);
+    }
+    pub fn set_wr_ptr_list(&mut self) {
+        for i in 0..self.wr_list.len() - 1 {
+            self.wr_list[i].next = &mut self.wr_list[i + 1];
+        }
+    }
+}
+
 pub fn process_rdma_cm_event(echannel: *mut rdma_event_channel, expected_event: rdma_cm_event_type::Type, rdma_event: *mut *mut rdma_cm_event) -> anyhow::Result<(), CustomError> {
     let res = unsafe { rdma_get_cm_event(echannel, rdma_event) };
     if res != 0 {
