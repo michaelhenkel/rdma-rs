@@ -1,6 +1,7 @@
 use std::{collections::HashMap, os::raw::c_void, ptr::null_mut};
 use common::*;
 use rdma_sys::*;
+use tokio::time;
 
 
 pub struct RdmaClient{
@@ -66,7 +67,7 @@ impl RdmaClient{
         Ok(())
     }
 
-    pub fn write(&self, message_size: u64, volume: u64, iterations: usize) -> anyhow::Result<(), CustomError> {
+    pub async fn write(&self, message_size: u64, volume: u64, iterations: usize) -> anyhow::Result<(), CustomError> {
 
         let messages = volume/message_size;
         let remaining_bytes = volume % message_size;
@@ -111,33 +112,45 @@ impl RdmaClient{
             data_list.push((mr_addr, id.clone(), metadata_request));
             metadata_mr_map.insert(qp_idx, metadata_mr_addr);
         }
-        for _ in 0..iterations{
-            let mut msg_qp_idx = 0;
-            for msg in 0..messages{
-                let qp_idx = msg % qps_to_use;
-                if qp_idx == 0 {
-                    msg_qp_idx += 1;
-                }
-                let (mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
-                //let (ref mut mr_addr, id, metadata_request) = &mut data_list[qp_idx as usize];
-                let offset = msg * (message_size as u64);
-                data.rdma_write(
-                    &id,
-                    mr_addr,
-                    metadata_request.rkey(),
-                    metadata_request.remote_address(),
-                    offset as usize,
-                    message_size as usize,
-                    messages_per_qp,
-                    msg_qp_idx
-                )?;
+
+
+        let data_addr = data.addr();
+        let data_addr = Address(data_addr);
+
+        for i in 0..iterations{
+            let mut jh_list = Vec::new();
+            for qp_idx in 0..qps_to_use{
+                let mut data_list = data_list.clone();
+                let data_addr = data_addr.clone();
+                let (mr_addr, id, metadata_request) = data_list.remove(qp_idx as usize);
+                let start_offset = qp_idx * messages_per_qp * message_size;
+                let rkey = metadata_request.rkey();
+                let remote_address = metadata_request.remote_address(); 
+                let mr = Mr(mr_addr.mr);
+                let jh = tokio::spawn(async move{
+                    rdma_write(
+                        &id,
+                        mr,
+                        data_addr,
+                        rkey,
+                        remote_address,
+                        start_offset as usize,
+                        message_size as usize,
+                        messages_per_qp,
+                        qp_idx
+                    ).unwrap();
+                    if i == iterations -1 {
+                        let mut metadata_request = metadata_request;
+                        let mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv).unwrap();
+                        metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
+                        metadata_request.rdma_send(&id, &mr_addr).unwrap();
+                    }
+                });
+                jh_list.push(jh);
+                //tokio::time::sleep(time::Duration::from_micros(200)).await;
+
             }
-        }
-        for qp_idx in 0..qps_to_use{
-            let (_mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
-            let metadata_mr_addr = metadata_mr_map.get(&qp_idx).unwrap();
-            metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
-            metadata_request.rdma_send(&id, &metadata_mr_addr)?;
+            futures::future::join_all(jh_list).await;
         }
         Ok(())
     }

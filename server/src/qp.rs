@@ -109,7 +109,6 @@ impl Qp{
         let mut metadata_request = MetaData::default();
         let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
         let mut data = None;
-        println!("waiting for metadata request");
         metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
         println!("{:?}", metadata_request.get_request_type());
         match metadata_request.get_request_type(){

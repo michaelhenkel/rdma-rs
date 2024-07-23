@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<(), CustomError> {
     //rdma_client.read(args.msg_size, args.iterations)?;
     //rdma_client.send(args.msg_size, args.iterations)?;
     println!("Client writing");
-    rdma_client.write(msg_size, volume, args.iterations)?;
+    rdma_client.write(msg_size, volume, args.iterations).await?;
     rdma_client.disconnect()?;
     println!("Client done");
     Ok(())

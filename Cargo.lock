@@ -433,6 +433,7 @@ dependencies = [
  "anyhow",
  "byte-unit",
  "clap 4.5.7",
+ "futures",
  "libc",
  "portpicker",
  "prost",

@@ -17,6 +17,7 @@ portpicker = "0.1.1"
 prost = "0.12.6"
 tokio-stream = "0.1.15"
 byte-unit = "5.1.4"
+futures = "0.3.30"
 
 [build-dependencies]
 tonic-build = "0.11.0"

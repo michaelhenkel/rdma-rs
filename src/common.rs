@@ -154,6 +154,7 @@ impl ProtectionDomain{
     }
 }
 
+#[derive(Clone)]
 pub struct Address(pub *mut c_void);
 unsafe impl Send for Address{}
 unsafe impl Sync for Address{}
@@ -163,6 +164,7 @@ impl Address{
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Mr(pub *mut ibv_mr);
 unsafe impl Send for Mr{}
 unsafe impl Sync for Mr{}
@@ -203,14 +205,14 @@ pub fn process_rdma_cm_event(echannel: *mut rdma_event_channel, expected_event: 
 
 pub struct Data{
     pub buffer: Vec<u8>,
-    mr: *mut ibv_mr,
+    mr: Mr,
 }
 
 impl Data{
     pub fn new(size: usize) -> Data{
         Data{
             buffer: vec![1u8; size],
-            mr: null_mut(),
+            mr: Mr(null_mut()),
         }
     }
     pub fn buffer(&self) -> Vec<u8>{
@@ -225,14 +227,15 @@ impl MrObject for Data{
     fn addr(&mut self) -> *mut c_void{
         self.buffer.as_mut_ptr().cast()
     }
-    fn set_mr(&mut self, mr: *mut ibv_mr){
+    fn set_mr(&mut self, mr: Mr){
         self.mr = mr;
     }
-    fn mr(&self) -> *mut ibv_mr{
-        self.mr
+    fn mr(&self) -> Mr{
+        self.mr.clone()
     }
 }
 
+#[derive(Clone)]
 pub struct MrAddr{
     pub mr: *mut ibv_mr,
     pub addr: *mut c_void,
@@ -240,15 +243,15 @@ pub struct MrAddr{
 
 pub trait MrObject{
     fn mr_rkey(&self) -> u32{
-        unsafe { (*self.mr()).rkey as u32 }
+        unsafe { (*self.mr().mr()).rkey as u32 }
     }
     fn mr_addr(&self) -> u64{
-        unsafe { (*self.mr()).addr as u64 }
+        unsafe { (*self.mr().mr()).addr as u64 }
     }
     fn len(&self) -> usize;
     fn addr(&mut self) -> *mut c_void;
-    fn set_mr(&mut self, mr: *mut ibv_mr);
-    fn mr(&self) -> *mut ibv_mr;
+    fn set_mr(&mut self, mr: Mr);
+    fn mr(&self) -> Mr;
     fn create_and_register_mr(&mut self, id: &Id, operation: Operation) -> anyhow::Result<MrAddr, CustomError> {
         if id.id().is_null(){
             return Err(CustomError::new("id is null".to_string(), -1).into());
@@ -270,7 +273,7 @@ pub trait MrObject{
             unsafe { rdma_dereg_mr(mr); }
             return Err(CustomError::new("rdma_reg_msgs".to_string(), -1).into());
         }
-        self.set_mr(mr);
+        self.set_mr(Mr(mr));
         Ok(MrAddr{mr, addr})
     }
     fn rdma_send(&mut self, id: &Id, mr_addr: &MrAddr) -> anyhow::Result<(), CustomError>{
@@ -304,7 +307,7 @@ pub trait MrObject{
     fn rdma_recv(&mut self, id: &Id, mr_addr: &MrAddr) -> anyhow::Result<(), CustomError>{
         let mut ret = unsafe { rdma_post_recv(id.id(), null_mut(), mr_addr.addr, self.len(), mr_addr.mr) };
         if ret != 0 {
-            unsafe { rdma_dereg_mr(self.mr()) };
+            unsafe { rdma_dereg_mr(self.mr().mr()) };
             return Err(CustomError::new("rdma_post_recv".to_string(), ret).into());
         }
         let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
@@ -377,7 +380,7 @@ pub trait MrObject{
                     null_mut(),
                     self.addr(),
                     self.len(),
-                    self.mr(),
+                    self.mr().mr(),
                     flags as i32,
                     remote_addr,
                     rkey
@@ -490,7 +493,7 @@ pub enum Operation{
     Read,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetaData{
     pub request_type: u8,
     pub remote_address: u64,
@@ -498,7 +501,7 @@ pub struct MetaData{
     pub rkey: u32,
     pub lkey: u32,
     pub iterations: u32,
-    mr: *mut ibv_mr,
+    mr: Mr,
 }
 
 impl Default for MetaData{
@@ -510,7 +513,7 @@ impl Default for MetaData{
             rkey: 0,
             lkey: 0,
             iterations: 0,
-            mr: null_mut(),
+            mr: Mr(null_mut()),
         }
     }
 }
@@ -632,11 +635,11 @@ impl MrObject for MetaData{
     fn addr(&mut self) -> *mut c_void {
         self as *const _ as *mut c_void
     }
-    fn set_mr(&mut self, mr: *mut ibv_mr){
+    fn set_mr(&mut self, mr: Mr){
         self.mr = mr;
     }
-    fn mr(&self) -> *mut ibv_mr{
-        self.mr
+    fn mr(&self) -> Mr{
+        self.mr.clone()
     }
 }
 
@@ -653,4 +656,54 @@ pub enum MetaDataRequestTypes{
     ReadResponse = 8,
     ReadFinished = 9,
     UnDef = 128,
+}
+
+pub fn rdma_write(
+    id: &Id,
+    mr: Mr,
+    addr: Address,
+    rkey: u32,
+    remote_addr: u64,
+    mut offset: usize,
+    msg_len: usize,
+    messages_per_qp: u64,
+    qp_idx: u64
+) -> anyhow::Result<(), CustomError>{
+    let mut flags = 0;
+    let mut comp = false;
+
+    for msg in 1..messages_per_qp+1{
+        if msg == messages_per_qp || msg as usize % BATCH_SIZE == 0{
+            flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0 | ibv_send_flags::IBV_SEND_SIGNALED.0;
+            comp = true;
+        }
+        let addr = addr.addr().wrapping_add(offset);
+        let remote_addr = remote_addr.wrapping_add(offset as u64);
+        
+        let ret = unsafe {
+            rdma_post_write(
+                id.0,
+                null_mut(),
+                addr,
+                msg_len,
+                mr.0,
+                flags as i32,
+                remote_addr,
+                rkey
+            )
+        };
+        
+        if ret != 0 {
+            unsafe { rdma_disconnect(id.0) };
+            return Err(CustomError::new("rdma_post_write".to_string(), ret).into());
+        }
+        
+        if comp{
+            let _ret = unsafe { send_complete(id.clone(), 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE)? };
+            flags = 0;
+            comp = false;
+        }
+        offset += msg_len;
+    }
+    Ok(())
 }
