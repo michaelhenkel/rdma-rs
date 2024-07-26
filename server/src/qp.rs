@@ -1,5 +1,5 @@
-use std::ptr::null_mut;
-use common::{CustomError, Data, Id, InitAttr, MetaData, MetaDataRequestTypes, MrAddr, MrObject, Operation, ProtectionDomain};
+use std::{ptr::null_mut, sync::{Arc, Mutex}};
+use common::{Address, CustomError, Data, Id, InitAttr, MetaData, MetaDataRequestTypes, MrObject, Operation, ProtectionDomain};
 use rdma_sys::*;
 #[derive(Clone)]
 pub struct Qp{
@@ -36,8 +36,8 @@ impl Qp{
         let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
         init_attr.cap.max_send_wr = 4096;
         init_attr.cap.max_recv_wr = 4096;
-        init_attr.cap.max_send_sge = 1;
-        init_attr.cap.max_recv_sge = 1;
+        init_attr.cap.max_send_sge = 15;
+        init_attr.cap.max_recv_sge = 15;
         init_attr.cap.max_inline_data = 64;
         init_attr.sq_sig_all = 1;
         
@@ -48,7 +48,18 @@ impl Qp{
         let ret = unsafe { rdma_create_ep(&mut listen_id, res, pd.as_ref().unwrap().pd(), &mut init_attr) };
         if ret != 0 {
             unsafe { rdma_freeaddrinfo(res); }
-            return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
+            let retries = 3;
+            for r in 0..retries{
+                let ret = unsafe { rdma_create_ep(&mut listen_id, res, pd.as_ref().unwrap().pd(), &mut init_attr) };
+                if ret == 0 {
+                    break;
+                }
+                if r == retries - 1 {
+                    return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            //return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
         }
         Ok(Qp{
             id: Id(id),
@@ -103,28 +114,32 @@ impl Qp{
         self.id = Id(id);
         Ok(())
     }
-    pub async fn listen(&mut self) -> anyhow::Result<u8, CustomError>{
+    pub async fn listen(&mut self, data: Arc<Mutex<Option<Data>>>) -> anyhow::Result<u8, CustomError>{
         println!("Listening");
         let id = self.id.clone();     
         let mut metadata_request = MetaData::default();
         let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
-        let mut data = None;
         metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
         println!("{:?}", metadata_request.get_request_type());
         match metadata_request.get_request_type(){
             MetaDataRequestTypes::WriteRequest => {
-
-                if data.is_none(){
-                    data = Some(Data::new(metadata_request.message_size() as usize));
-                }
-
-                let mr = unsafe { rdma_reg_write(id.id(), data.as_mut().unwrap().addr(), data.as_ref().unwrap().len()) };
+                let data_addr_len = {
+                    let mut data = data.lock().unwrap();
+                    if data.is_none(){
+                        *data = Some(Data::new(metadata_request.message_size() as usize));
+                    }
+                    let data_addr = data.as_mut().unwrap().addr();
+                    let data_addr = Address(data_addr);
+                    let data_len = data.as_ref().unwrap().len();
+                    Some((data_addr, data_len))
+                };
+                let (data_addr, data_len) = data_addr_len.unwrap();
+                let mr = unsafe { rdma_reg_write(id.id(), data_addr.addr(), data_len) };
                 if mr.is_null(){
                     return Err(CustomError::new("rdma_reg_write".to_string(), -1).into());
                 }
                 let mr_addr = unsafe { (*mr).addr as u64 };
                 let mr_rkey = unsafe { (*mr).rkey as u32 };
-   
                 metadata_request.set_request_type(MetaDataRequestTypes::WriteResponse);
                 metadata_request.set_remote_address(mr_addr);
                 metadata_request.set_rkey(mr_rkey);

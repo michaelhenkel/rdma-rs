@@ -689,7 +689,6 @@ pub fn rdma_write(
     mut offset: usize,
     msg_len: usize,
     messages_per_qp: u64,
-    qp_idx: u64
 ) -> anyhow::Result<(), CustomError>{
     let mut flags = 0;
     let mut comp = false;

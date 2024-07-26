@@ -1,8 +1,6 @@
-use std::{collections::HashMap, os::raw::c_void, ptr::null_mut};
+use std::{collections::HashMap, ptr::null_mut};
 use common::*;
 use rdma_sys::*;
-use tokio::time;
-
 
 pub struct RdmaClient{
     id: Vec<Id>,
@@ -31,8 +29,8 @@ impl RdmaClient{
         let mut id: *mut rdma_cm_id = null_mut();
         attr.cap.max_send_wr = 4096;
         attr.cap.max_recv_wr = 4096;
-        attr.cap.max_send_sge = 1;
-        attr.cap.max_recv_sge = 1;
+        attr.cap.max_send_sge = 15;
+        attr.cap.max_recv_sge = 15;
         attr.cap.max_inline_data = 64;
         attr.qp_context = id.cast();
         attr.sq_sig_all = 0;
@@ -70,7 +68,7 @@ impl RdmaClient{
     pub async fn write(&self, message_size: u64, volume: u64, iterations: usize) -> anyhow::Result<(), CustomError> {
 
         let messages = volume/message_size;
-        let remaining_bytes = volume % message_size;
+        let _remaining_bytes = volume % message_size;
 
         let qps_to_use = if messages > self.id.len() as u64 { self.id.len() as u64 } else { messages };
         let messages_per_qp = messages / qps_to_use;
@@ -115,10 +113,11 @@ impl RdmaClient{
 
         println!("qps to use: {}, messages per qp: {}", qps_to_use, messages_per_qp);
 
-        let mut sge_list = Vec::new();
+        let mut sge_map = HashMap::new();
         let mut offset = 0;
         for qp_idx in 0..qps_to_use{
             let (mr_addr, _id, _metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
+            let mut sge_list = Vec::new();
             for _ in 0..messages_per_qp{
                 let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
                 let addr = unsafe { (*mr_addr.mr).addr };
@@ -128,84 +127,86 @@ impl RdmaClient{
                 sge_list.push(sge);
                 offset += message_size;
             }
+            sge_map.insert(qp_idx, sge_list);
         }
 
-        let mut wr_idx = 0;
-        //let mut wr_list = Vec::new();
+        
         let mut id_wr_list = Vec::new();
-        let mut offset = 0;
         let mut qp_completions = Vec::new();
         for qp_idx in 0..qps_to_use{
             let (_mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
             let mut id_wr = IdWr::new(id.clone());
             let id = id.clone();
             qp_completions.push((id, 0));
-            for msg in 0..messages_per_qp{
-                let sge = sge_list.get_mut(wr_idx).unwrap();
-                let mut wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
-                wr.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
-                if msg + 1 == messages_per_qp || (msg as usize) + 1 % 2000 == 0{
-                    wr.send_flags =  ibv_send_flags::IBV_SEND_SIGNALED.0;
-                    qp_completions[qp_idx as usize].1 += 1;
-                } else {
-                    wr.send_flags = 0;
+            let sge_list = sge_map.get_mut(&qp_idx).unwrap();
+            let mut msg_counter = 1;
+            for _ in 0..iterations{
+                let mut wr_idx = 0;
+                for msg in 0..messages_per_qp{
+                    let offset = qp_idx * messages_per_qp * message_size + msg * message_size;
+                    let sge = sge_list.get_mut(wr_idx).unwrap();
+                    let mut wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+                    wr.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
+                    if msg_counter == (iterations as u64 * messages_per_qp) || msg_counter % 2000 == 0{
+                        wr.send_flags =  ibv_send_flags::IBV_SEND_SIGNALED.0;
+                        qp_completions[qp_idx as usize].1 += 1;
+                    } else {
+                        wr.send_flags = 0;
+                    }
+                    wr.sg_list = &mut *sge;
+                    wr.num_sge = 1;
+                    let remote_addr = metadata_request.remote_address();
+                    let remote_addr = remote_addr.wrapping_add(offset);
+                    wr.wr.rdma.remote_addr = remote_addr;
+                    wr.wr.rdma.rkey = metadata_request.rkey();
+                    id_wr.add_wr(wr);
+                    wr_idx += 1;
+                    msg_counter += 1;
                 }
-                wr.sg_list = &mut *sge;
-                wr.num_sge = 1;
-                let remote_addr = metadata_request.remote_address();
-                let remote_addr = remote_addr.wrapping_add(offset);
-                wr.wr.rdma.remote_addr = remote_addr;
-                wr.wr.rdma.rkey = metadata_request.rkey();
-                id_wr.add_wr(wr);
-                //wr_list.push((id.clone(), wr));
-                offset += message_size;
-                wr_idx += 1;
             }
             id_wr.set_wr_ptr_list();
             id_wr_list.push(id_wr);
         }
 
-        for i in 0..iterations{
-            let qp_completions = qp_completions.clone();
-            for id_wr in &mut id_wr_list{
-                let id = id_wr.id.clone();
-                let first_wr = id_wr.wr_list.get_mut(0).unwrap();
-                let qp = unsafe { (*id.id()).qp };
-                let mut bad_wr = null_mut();
-                let ret = unsafe { ibv_post_send(qp, &mut *first_wr, &mut bad_wr) };
-                if ret != 0 {
-                    return Err(CustomError::new("ibv_post_send".to_string(), ret).into());
-                }
+        for id_wr in &mut id_wr_list{
+            let id = id_wr.id.clone();
+            let first_wr = id_wr.wr_list.get_mut(0).unwrap();
+            let qp = unsafe { (*id.id()).qp };
+            let mut bad_wr = null_mut();
+            let ret = unsafe { ibv_post_send(qp, &mut *first_wr, &mut bad_wr) };
+            if ret != 0 {
+                return Err(CustomError::new("ibv_post_send".to_string(), ret).into());
             }
-
-            let mut jh_list = Vec::new();
-            let mut finish_list = Vec::new();
-
-            for (id, completions) in qp_completions{
-                let completions = completions.clone();
-                println!("Waiting for completions: {}", completions);
-                finish_list.push(id.clone());
-                let jh = tokio::spawn(async move{
-                    unsafe { send_complete(id, completions, ibv_wc_opcode::IBV_WC_RDMA_WRITE) }.unwrap();
-                });
-                jh_list.push(jh);
-            }
-            futures::future::join_all(jh_list).await;
-
-            if i == iterations - 1{
-                for id in finish_list{
-                    let mut metadata_request = MetaData::default();
-                    metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
-                    let mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv).unwrap();
-                    metadata_request.rdma_send(&id, &mr_addr).unwrap();
-                }
-            }
-
-
+            // get a random number between 0 and 200
+            let random_number = rand::random::<u8>() % 200;
+            tokio::time::sleep(tokio::time::Duration::from_millis(random_number as u64)).await;
         }
+        let mut jh_list = Vec::new();
+        let mut finish_list = Vec::new();
+        let now = tokio::time::Instant::now();
+        for (id, completions) in qp_completions{
+            let completions = completions.clone();
+            println!("Waiting for completions: {}", completions);
+            finish_list.push(id.clone());
+            let jh = tokio::spawn(async move{
+                unsafe { send_complete(id, completions, ibv_wc_opcode::IBV_WC_RDMA_WRITE) }.unwrap();
+            });
+            jh_list.push(jh);
+        }
+        futures::future::join_all(jh_list).await;
+        let elapsed = now.elapsed();
+        let message_size_byte = byte_unit::Byte::from_u64(volume * (iterations as u64));
+        let message_size_string = format!("{message_size_byte:#}");
+        let gbit = (volume * (iterations as u64) * 8) as f64 / 1_000_000_000.0;
+        let gbps = gbit / elapsed.as_secs_f64();
+        println!("wrote {} in {:.2}s: {:.2} Gbps",message_size_string, elapsed.as_secs_f64(), gbps);
 
-
-
+        for id in finish_list{
+            let mut metadata_request = MetaData::default();
+            metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
+            let mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv).unwrap();
+            metadata_request.rdma_send(&id, &mr_addr).unwrap();
+        }
         Ok(())
     }
     /*

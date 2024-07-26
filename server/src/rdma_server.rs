@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 use common::*;
 use tokio::sync::RwLock;
 
@@ -29,7 +29,9 @@ impl RdmaServer{
         let mut rx = self.rx.write().await;
         let qps: Arc<RwLock<HashMap<u16, Qp>>> = Arc::new(RwLock::new(HashMap::new()));
         let mut pd = None;
+        let data: Arc<Mutex<Option<Data>>> = Arc::new(Mutex::new(None));
         while let Some(rdma_server_command) = rx.recv().await{
+            let data = data.clone();
             match rdma_server_command{
                 RdmaServerCommand::Listen{port, tx} => {
                     let qps = qps.write().await;
@@ -37,7 +39,7 @@ impl RdmaServer{
                     let mut qp = qp.clone();
                     tokio::spawn(async move{
                         loop {
-                            let ret = qp.listen().await.unwrap();
+                            let ret = qp.listen(data.clone()).await.unwrap();
                             if ret == 0 {
                                 break;
                             }
