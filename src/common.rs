@@ -184,9 +184,15 @@ impl InitAttr{
     }
 }
 
+
+pub struct IbvSendWr(pub ibv_send_wr);
+unsafe impl Send for IbvSendWr{}
+unsafe impl Sync for IbvSendWr{}
+
+
 pub struct IdWr{
     pub id: Id,
-    pub wr_list: Vec<ibv_send_wr>,
+    pub wr_list: Vec<IbvSendWr>,
 }
 
 impl IdWr{
@@ -196,12 +202,12 @@ impl IdWr{
             wr_list: Vec::new(),
         }
     }
-    pub fn add_wr(&mut self, wr: ibv_send_wr){
+    pub fn add_wr(&mut self, wr: IbvSendWr){
         self.wr_list.push(wr);
     }
     pub fn set_wr_ptr_list(&mut self) {
         for i in 0..self.wr_list.len() - 1 {
-            self.wr_list[i].next = &mut self.wr_list[i + 1];
+            self.wr_list[i].0.next = &mut self.wr_list[i + 1].0;
         }
     }
 }
