@@ -2,7 +2,7 @@ use std::{collections::HashMap, ptr::null_mut, sync::{Arc, Mutex}};
 use common::*;
 use rdma_sys::*;
 
-const BATCH_SIZE: usize = 100;
+const BATCH_SIZE: usize = 4096;
 
 pub struct RdmaClient{
     id: Vec<Id>,
@@ -137,31 +137,33 @@ impl RdmaClient{
         //let mut qp_list = Vec::new();
 
 
-        let mut id_wr_list = Vec::new();
-        for _ in 0..iterations{
-            let mut qp_list = Vec::new();
-            for _ in 0..qps_to_use{
-                qp_list.push(Vec::new());
-            }
-            id_wr_list.push(qp_list);
+
+        let mut qp_map = HashMap::new();
+        for qp_idx in 0..qps_to_use{
+            qp_map.insert(qp_idx, Vec::new());
         }
+    
+
 
         let mut completion_map = HashMap::new();
         for qp_idx in 0..qps_to_use{
             completion_map.insert(qp_idx, (Id(null_mut()), 0));
         }
 
+        let total_msg_per_qp = messages_per_qp * iterations as u64;
         let mut id_map = HashMap::new();
-        for it in 0..iterations{
+        let mut qp_idwr_map: HashMap<u64, IdWr> = HashMap::new();
+        for _it in 0..iterations{
             for qp_idx in 0..qps_to_use{
                 let (_mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
-                let mut id_wr = IdWr::new(id.clone());
+                //let mut id_wr = IdWr::new(id.clone());
                 let id = id.clone();
                 id_map.insert(qp_idx, id.clone());
                 let sge_list = sge_map.get_mut(&qp_idx).unwrap();
                 let mut wr_idx = 0;
                 completion_map.get_mut(&qp_idx).unwrap().0 = id.clone();
                 for msg in 0..messages_per_qp{
+                    let mut id_wr = qp_idwr_map.remove(&qp_idx).unwrap_or_else(|| IdWr::new(id.clone()));
                     let offset = qp_idx * messages_per_qp * message_size + msg * message_size;
                     let sge = sge_list.get_mut(wr_idx).unwrap();
                     let mut wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
@@ -172,23 +174,27 @@ impl RdmaClient{
                     let remote_addr = remote_addr.wrapping_add(offset);
                     wr.wr.rdma.remote_addr = remote_addr;
                     wr.wr.rdma.rkey = metadata_request.rkey();
-                    if msg + 1 == messages_per_qp || (msg + 1) as usize % BATCH_SIZE == 0{
+                    let current_msg_count = id_wr.wr_list.len();
+                    if current_msg_count + 1 == total_msg_per_qp as usize || (current_msg_count + 1) % BATCH_SIZE == 0{
                         completion_map.get_mut(&qp_idx).unwrap().1 += 1;
                         wr.send_flags =  ibv_send_flags::IBV_SEND_SIGNALED.0;
                     } else {
                         wr.send_flags = 0;
                     }
                     id_wr.add_wr(IbvSendWr(wr));
-                    if msg + 1 == messages_per_qp || (msg + 1) as usize % BATCH_SIZE == 0{
+                    //println!("current_msg_count: {}, total_msg_per_qp: {}", current_msg_count, total_msg_per_qp);
+                    if current_msg_count + 1 == total_msg_per_qp as usize || (current_msg_count + 1) % BATCH_SIZE == 0{
                         id_wr.set_wr_ptr_list();
-                        id_wr_list[it][qp_idx as usize].push(id_wr);
+                        qp_map.get_mut(&qp_idx).unwrap().push(id_wr);
                         id_wr = IdWr::new(id.clone());
                     }
+                    qp_idwr_map.insert(qp_idx, id_wr);
                     wr_idx += 1;
                 }
             }
         }
 
+        /*
         let mut jh_list = Vec::new();
         for (qp_idx, (id, completions)) in completion_map{
             let jh = tokio::spawn(async move{
@@ -197,15 +203,24 @@ impl RdmaClient{
             jh_list.push(jh);
             println!("qp_idx: {}, completions: {}", qp_idx, completions);
         }
+        */
+
+   
+            for (qp_idx, id_wr_list) in &qp_map{
+                println!("qp_idx: {}, id_wr_list: {}, wrs per list {}", qp_idx, id_wr_list.len(), id_wr_list[0].wr_list.len());
+            }
+        
 
         let iter_now = tokio::time::Instant::now();
 
-        while let Some(mut qp_list) = id_wr_list.pop(){
-            while let Some(id_wr_list) = qp_list.pop(){
-                let id_wr_list = Arc::new(Mutex::new(id_wr_list));
-                let random_number = rand::random::<u8>() % 200;
-                tokio::time::sleep(tokio::time::Duration::from_micros(random_number as u64)).await;
-                let id_wr_list = id_wr_list.clone();
+
+        let mut jh_list = Vec::new();
+        while let Some((_qp_idx, id_wr_list)) = qp_map.drain().next(){
+            let id_wr_list = Arc::new(Mutex::new(id_wr_list));
+            let random_number = rand::random::<u8>() % 200;
+            tokio::time::sleep(tokio::time::Duration::from_micros(random_number as u64)).await;
+            let id_wr_list = id_wr_list.clone();
+            let jh = tokio::spawn(async move {
                 let mut id_wr_list = id_wr_list.lock().unwrap();
                 while let Some(mut id_wr) = id_wr_list.pop(){
                     let first_wr = &mut id_wr.wr_list.get_mut(0).unwrap().0;
@@ -216,10 +231,15 @@ impl RdmaClient{
                     if ret != 0 {
                         println!("ibv_post_send failed");
                     }
+                    let compl = unsafe { send_complete(id, 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE) }.unwrap();
+                    println!("qp_idx: {}, compl: {}", _qp_idx, compl);
                 }
-            }
+            });
+            jh_list.push(jh);
         }
         futures::future::join_all(jh_list).await;
+        
+        //futures::future::join_all(jh_list).await;
         let iter_elapsed = iter_now.elapsed();
         let message_size_byte = byte_unit::Byte::from_u64(volume * (iterations as u64));
         let message_size_string = format!("{message_size_byte:#}");
