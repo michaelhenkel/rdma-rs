@@ -234,7 +234,7 @@ impl RdmaClient{
 
         let mut jh_list = Vec::new();
         let iter_now = tokio::time::Instant::now();
-        while let Some((qp_idx, id_wr_list)) = qp_map.drain().next(){
+        for (qp_idx, id_wr_list) in qp_map.drain(){
             let id_wr_list = Arc::new(Mutex::new(id_wr_list));
             //let random_number = rand::random::<u8>() % 200;
             
@@ -244,6 +244,8 @@ impl RdmaClient{
                 let mut id_wr_list = id_wr_list.lock().unwrap();
                 while let Some(mut id_wr) = id_wr_list.pop(){
                     let first_wr = &mut id_wr.wr_list.get_mut(0).unwrap().0;
+                    println!("qp_idx: {}, id_wr_list: {}", qp_idx, id_wr_list.len());
+                    print_wr_ids(&first_wr);
                     let id = id_wr.id.clone();
                     let qp = unsafe { (*id.id()).qp };
                     let mut bad_wr = null_mut();
