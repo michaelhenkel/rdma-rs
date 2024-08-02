@@ -195,6 +195,9 @@ impl RdmaClient{
         let mut bla: u64 = 0;
         for (_qp_idx, id_wr_list) in &qp_map{
             for (_idwr_idx, id_wr) in id_wr_list.iter().enumerate(){
+                let wr = &id_wr.wr_list.get(0).unwrap().0;
+                print_wr_ids(wr);
+
                 for (_wr_idx, wr) in id_wr.wr_list.iter().enumerate(){
                     let sge = &wr.0.sg_list;
                     bla += unsafe { (**sge).length as u64 };
@@ -206,7 +209,7 @@ impl RdmaClient{
         if bla as u64 != total_msg_size{
             panic!("bla {} != total_msg_size {}", bla, total_msg_size);
         }
-        /*
+        
             let mut bla = 0;
             for (qp_idx, id_wr_list) in &qp_map{
                 println!("qp_idx: {}, id_wr_list: {}", qp_idx, id_wr_list.len());
@@ -214,13 +217,14 @@ impl RdmaClient{
                     println!("idwr_idx: {}, wrs: {}", idwr_idx, id_wr.wr_list.len());
                     for (wr_idx, wr) in id_wr.wr_list.iter().enumerate(){
                         let sge = &wr.0.sg_list;
-                        println!("wr_idx: {}, addr: {}, len: {}", wr_idx, unsafe { (**sge).addr }, unsafe { (**sge).length });
+                        let remote_addr = unsafe { wr.0.wr.rdma.remote_addr };
+                        println!("wr_idx: {}, addr: {}, len: {}, remote_addr: {}", wr_idx, unsafe { (**sge).addr }, unsafe { (**sge).length }, remote_addr);
                         bla += unsafe { (**sge).length };
                     }
                 }
             }
             println!("total_msg_size: {}, volume: {}, bla: {}", total_msg_size, volume, bla);
-        */
+        
 
 
         
@@ -230,12 +234,13 @@ impl RdmaClient{
 
         let mut jh_list = Vec::new();
         let iter_now = tokio::time::Instant::now();
-        while let Some((_qp_idx, id_wr_list)) = qp_map.drain().next(){
+        while let Some((qp_idx, id_wr_list)) = qp_map.drain().next(){
             let id_wr_list = Arc::new(Mutex::new(id_wr_list));
-            let random_number = rand::random::<u8>() % 200;
-            tokio::time::sleep(tokio::time::Duration::from_millis(random_number as u64)).await;
+            //let random_number = rand::random::<u8>() % 200;
+            
             let id_wr_list = id_wr_list.clone();
             let jh = tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(qp_idx * 10)).await;
                 let mut id_wr_list = id_wr_list.lock().unwrap();
                 while let Some(mut id_wr) = id_wr_list.pop(){
                     let first_wr = &mut id_wr.wr_list.get_mut(0).unwrap().0;
@@ -320,6 +325,31 @@ impl RdmaClient{
     */
     
 }
+
+pub fn print_wr_ids(start: &ibv_send_wr) {
+    let mut current = start;
+
+
+    while !current.next.is_null() {
+        let sge = &current.sg_list;
+        let sge_len = unsafe { (**sge).length as u64 };
+        let sge_addr = unsafe { (**sge).addr };
+        let remote_addr = unsafe { current.wr.rdma.remote_addr };
+        println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}", current.wr_id, sge_addr, sge_len, remote_addr);
+
+        unsafe {
+            // Move to the next element
+            current = &*current.next;
+        }
+
+    }
+    let sge = &current.sg_list;
+    let sge_len = unsafe { (**sge).length as u64 };
+    let sge_addr = unsafe { (**sge).addr };
+    let remote_addr = unsafe { current.wr.rdma.remote_addr };
+    println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}", current.wr_id, sge_addr, sge_len, remote_addr);
+}
+
 #[derive(Clone)]
 struct QueuePair {
     message_blocks: Vec<MessageBlock>,
