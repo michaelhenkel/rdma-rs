@@ -71,15 +71,6 @@ impl RdmaClient{
 
         let messages = volume/message_size;
         let qps_to_use = if messages > self.id.len() as u64 { self.id.len() as u64 } else { messages };
-
-
-        /*
-        for (i, queue) in queues.iter().enumerate() {
-            println!("Queue pair {}: {:#?}", i + 1, queue);
-        }
-        */
-
-        //let messages_per_qp = messages / qps_to_use;
         let mut data_list = Vec::with_capacity(qps_to_use as usize);
         let mut metadata_mr_map = HashMap::new();
         let mut data = Data::new(volume as usize);
@@ -134,18 +125,11 @@ impl RdmaClient{
                 }
             }
         }
-        
-        //let mut id_wr_list = Vec::new();
-        //let mut qp_list = Vec::new();
-
-
 
         let mut qp_map = HashMap::new();
         for qp_idx in 0..qps_to_use{
             qp_map.insert(qp_idx, Vec::new());
         }
-    
-
 
         let mut completion_map = HashMap::new();
         for qp_idx in 0..qps_to_use{
@@ -195,9 +179,6 @@ impl RdmaClient{
         let mut bla: u64 = 0;
         for (_qp_idx, id_wr_list) in &qp_map{
             for (_idwr_idx, id_wr) in id_wr_list.iter().enumerate(){
-                let wr = &id_wr.wr_list.get(0).unwrap().0;
-                print_wr_ids(wr);
-
                 for (_wr_idx, wr) in id_wr.wr_list.iter().enumerate(){
                     let sge = &wr.0.sg_list;
                     bla += unsafe { (**sge).length as u64 };
@@ -209,43 +190,17 @@ impl RdmaClient{
         if bla as u64 != total_msg_size{
             panic!("bla {} != total_msg_size {}", bla, total_msg_size);
         }
-        
-            let mut bla = 0;
-            for (qp_idx, id_wr_list) in &qp_map{
-                println!("qp_idx: {}, id_wr_list: {}", qp_idx, id_wr_list.len());
-                for (idwr_idx, id_wr) in id_wr_list.iter().enumerate(){
-                    println!("idwr_idx: {}, wrs: {}", idwr_idx, id_wr.wr_list.len());
-                    for (wr_idx, wr) in id_wr.wr_list.iter().enumerate(){
-                        let sge = &wr.0.sg_list;
-                        let remote_addr = unsafe { wr.0.wr.rdma.remote_addr };
-                        println!("wr_idx: {}, addr: {}, len: {}, remote_addr: {}", wr_idx, unsafe { (**sge).addr }, unsafe { (**sge).length }, remote_addr);
-                        bla += unsafe { (**sge).length };
-                    }
-                }
-            }
-            println!("total_msg_size: {}, volume: {}, bla: {}", total_msg_size, volume, bla);
-        
-
-
-        
-
-        
-
-
         let mut jh_list = Vec::new();
         let iter_now = tokio::time::Instant::now();
-        for (qp_idx, id_wr_list) in qp_map.drain(){
+        for (_qp_idx, id_wr_list) in qp_map.drain(){
             let id_wr_list = Arc::new(Mutex::new(id_wr_list));
-            //let random_number = rand::random::<u8>() % 200;
-            
             let id_wr_list = id_wr_list.clone();
             let jh = tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(qp_idx * 10)).await;
+                let random_number = rand::random::<u8>() % 200;
+                tokio::time::sleep(tokio::time::Duration::from_micros(random_number as u64)).await;
                 let mut id_wr_list = id_wr_list.lock().unwrap();
                 while let Some(mut id_wr) = id_wr_list.pop(){
                     let first_wr = &mut id_wr.wr_list.get_mut(0).unwrap().0;
-                    println!("qp_idx: {}, id_wr_list: {}", qp_idx, id_wr_list.len());
-                    print_wr_ids(&first_wr);
                     let id = id_wr.id.clone();
                     let qp = unsafe { (*id.id()).qp };
                     let mut bad_wr = null_mut();
@@ -254,7 +209,6 @@ impl RdmaClient{
                         println!("ibv_post_send failed");
                     }
                     let _compl = unsafe { send_complete(id, 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE) }.unwrap();
-                    //println!("qp_idx: {}, compl: {}", _qp_idx, compl);
                 }
             });
             jh_list.push(jh);
