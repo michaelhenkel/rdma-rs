@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::rdma_server::{RdmaServer, RdmaServerClient};
+use crate::{connection_manager::connection_manager::{MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse}, rdma_server::{RdmaServer, RdmaServerClient}};
 use tokio::sync::RwLock;
 
 pub struct ServerManager{
@@ -28,6 +28,12 @@ impl ServerManager{
         while let Some(server_manager_command) = rx.recv().await{
             //let address = self.address.clone();
             match server_manager_command{
+                ServerManagerCommand::CreateMemoryRegion { memory_region, tx } => {
+                    let mut rdma_server_clients = self.rdma_server_clients.write().await;
+                    let rdma_server_client = rdma_server_clients.get_mut(&memory_region.client_id).unwrap();
+                    let memory_region_response = rdma_server_client.create_memory_region(memory_region).await.unwrap();
+                    tx.send(Ok(memory_region_response)).unwrap();
+                }
                 ServerManagerCommand::CreateRdmaServer{client_id, tx} => {
                     let rdma_server = RdmaServer::new(self.address.clone());
                     let rdma_server_client = rdma_server.client.clone();
@@ -38,25 +44,11 @@ impl ServerManager{
                     rdma_server_clients.insert(client_id, rdma_server_client);
                     tx.send(Ok(())).unwrap();
                 },
-                ServerManagerCommand::ConnectQp { client_id, port, tx } => {
+                ServerManagerCommand::CreateQueuePair{qp_request, tx} => {
                     let mut rdma_server_clients = self.rdma_server_clients.write().await;
-                    let rdma_server_client = rdma_server_clients.get_mut(&client_id).unwrap();
-                    rdma_server_client.connect_qp(port).await.unwrap();
-                    tx.send(Ok(())).unwrap();
-                }
-                ServerManagerCommand::Listen{client_id, port, tx} => {
-                    let mut rdma_server_clients = self.rdma_server_clients.write().await;
-                    let mut rdma_server_client = rdma_server_clients.get_mut(&client_id).unwrap().clone();
-                    tokio::spawn(async move{
-                        rdma_server_client.listen(port).await.unwrap();
-                    });
-                    tx.send(Ok(())).unwrap();
-                },
-                ServerManagerCommand::CreateQp{client_id, tx} => {
-                    let mut rdma_server_clients = self.rdma_server_clients.write().await;
-                    let rdma_server_client = rdma_server_clients.get_mut(&client_id).unwrap();
-                    let qp_idx = rdma_server_client.create_qp().await.unwrap();
-                    tx.send(Ok(qp_idx)).unwrap();
+                    let rdma_server_client = rdma_server_clients.get_mut(&qp_request.client_id).unwrap();
+                    let qp_response = rdma_server_client.create_queue_pair(qp_request).await.unwrap();
+                    tx.send(Ok(qp_response)).unwrap();
                 }
             }
         }
@@ -79,21 +71,18 @@ impl ServerManagerClient{
         self.tx.send(ServerManagerCommand::CreateRdmaServer{client_id, tx}).await.unwrap();
         rx.await.unwrap()
     }
-    pub async fn listen(&mut self, client_id: u32, port: u16) -> anyhow::Result<()>{
+    // client.exchange_qp_gid(connection_request.client_id, connection_request.qpn, connection_request.gid_subnet_id, connection_request.gid_interface_id).await.unwrap();
+    pub async fn create_queue_pair(&mut self, qp_request: QueuePairRequest) -> anyhow::Result<QueuePairResponse>{
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(ServerManagerCommand::Listen{client_id, port, tx}).await.unwrap();
+        self.tx.send(ServerManagerCommand::CreateQueuePair{qp_request, tx}).await.unwrap();
         rx.await.unwrap()
     }
-    pub async fn create_qp(&mut self, client_id: u32) -> anyhow::Result<u16>{
+    pub async fn create_memory_region(&mut self, memory_region: MemoryRegionRequest) -> anyhow::Result<MemoryRegionResponse>{
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(ServerManagerCommand::CreateQp{client_id, tx}).await.unwrap();
+        self.tx.send(ServerManagerCommand::CreateMemoryRegion{memory_region, tx}).await.unwrap();
         rx.await.unwrap()
     }
-    pub async fn connect_qp(&mut self, client_id: u32, port: u16) -> anyhow::Result<()>{
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(ServerManagerCommand::ConnectQp{client_id, port, tx}).await.unwrap();
-        rx.await.unwrap()
-    }
+    
 
 }
 
@@ -102,18 +91,12 @@ pub enum ServerManagerCommand{
         client_id: u32,
         tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>
     },
-    Listen{
-        client_id: u32,
-        port: u16,
-        tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>
+    CreateQueuePair{
+        qp_request: QueuePairRequest,
+        tx: tokio::sync::oneshot::Sender<anyhow::Result<QueuePairResponse>>
     },
-    CreateQp{
-        client_id: u32,
-        tx: tokio::sync::oneshot::Sender<anyhow::Result<u16>>
-    },
-    ConnectQp{
-        client_id: u32,
-        port: u16,
-        tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>
+    CreateMemoryRegion{
+        memory_region: MemoryRegionRequest,
+        tx: tokio::sync::oneshot::Sender<anyhow::Result<MemoryRegionResponse>>
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     connection_manager_server::{
         ConnectionManager,
         ConnectionManagerServer
-    }, ConnectQpRequest, ListenRequest, ListenResponse, QpRequest, QpResponse, RdmaServerRequest, StatusResponse
+    }, MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse, RdmaServerRequest, StatusResponse
 },
 server_manager::ServerManagerClient};
 use tonic::{transport::Server, Request, Response, Status};
@@ -56,40 +56,26 @@ impl ConnectionManager for GrpcServer {
         };
         Ok(Response::new(connection_response))
     }
-
-    async fn create_qp(
+    async fn create_queue_pair(
         &self,
-        request: Request<QpRequest>,
-    ) -> Result<Response<QpResponse>, Status> {
+        request: Request<QueuePairRequest>,
+    ) -> Result<Response<QueuePairResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let rdma_port = client.create_qp(connection_request.client_id).await.unwrap();
-        let connection_response = QpResponse{
-            port: rdma_port as u32
-        };
-        Ok(Response::new(connection_response))
+        let qp_gid = client.create_queue_pair(connection_request).await.unwrap();
+        Ok(Response::new(qp_gid))
     }
 
-    async fn request_qp_connection(
+    async fn create_memory_region(
         &self,
-        request: Request<ConnectQpRequest>,
-    ) -> Result<Response<StatusResponse>, Status> {
-        let connection_request = request.into_inner();
+        request: Request<MemoryRegionRequest>,
+    ) -> Result<Response<MemoryRegionResponse>, Status> {
+        let memory_region_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        let _rdma_port = client.connect_qp(connection_request.client_id, connection_request.port as u16).await;
-        let connection_response = StatusResponse::default();
-        Ok(Response::new(connection_response))
+        let memory_region = client.create_memory_region(memory_region_request).await.unwrap();
+        Ok(Response::new(memory_region))
     }
+    
 
-    async fn qp_listen(
-        &self,
-        request: Request<ListenRequest>,
-    ) -> Result<Response<ListenResponse>, Status> {
-        let connection_request = request.into_inner();
-        let mut client = self.server_manager_client.clone();
-        let _rdma_port = client.listen(connection_request.client_id, connection_request.port as u16).await;
-        let connection_response = ListenResponse::default();
-        Ok(Response::new(connection_response))
-    }
 
 }

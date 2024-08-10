@@ -4,22 +4,35 @@ package connection_manager;
 
 service ConnectionManager {
     rpc CreateRdmaServer (RdmaServerRequest) returns (StatusResponse);
-    rpc CreateQp (QpRequest) returns (QpResponse);
-    rpc RequestQpConnection (ConnectQpRequest) returns (StatusResponse);
-    rpc QpListen (ListenRequest) returns (ListenResponse);
+    rpc CreateQueuePair (QueuePairRequest) returns (QueuePairResponse); 
+    rpc CreateMemoryRegion (MemoryRegionRequest) returns (MemoryRegionResponse);
 }
 
-message ConnectQpRequest {
+message MemoryRegionRequest {
     uint32 client_id = 1;
-    uint32 port = 2;
+    uint64 size = 2;
 }
 
-message QpRequest{
+message MemoryRegionResponse {
+    uint64 addr = 1;
+    uint32 rkey = 2;
+}
+
+message QueuePairRequest {
     uint32 client_id = 1;
+    uint32 qpn = 2;
+    uint64 gid_subnet_id = 3;
+    uint64 gid_interface_id = 4;
+    uint32 lid = 5;
+    uint32 psn = 6;
 }
 
-message QpResponse{
-    uint32 port = 1;
+message QueuePairResponse {
+    uint32 qpn = 1;
+    uint64 gid_subnet_id = 2;
+    uint64 gid_interface_id = 3;
+    uint32 lid = 4;
+    uint32 psn = 5;
 }
 
 message RdmaServerRequest {
@@ -27,18 +40,5 @@ message RdmaServerRequest {
 }
 
 message StatusResponse{
-    string msg = 1;
-}
-
-message ConnectResponse {
-    repeated uint32 server_port = 1;
-}
-
-message ListenRequest {
-    uint32 client_id = 1;
-    uint32 port = 2;
-}
-
-message ListenResponse {
     string msg = 1;
 }

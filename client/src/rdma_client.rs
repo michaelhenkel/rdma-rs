@@ -1,336 +1,273 @@
-use std::{collections::HashMap, ptr::null_mut, sync::{Arc, Mutex}};
+use std::ptr::{self, null_mut};
 use common::*;
+use log::info;
 use rdma_sys::*;
 
-const BATCH_SIZE: u64 = 10;
+use crate::{connection_manager::connection_manager::{MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest}, grpc_client::GrpcClient};
+
+const BATCH_SIZE: u64 = 2000;
 
 pub struct RdmaClient{
-    id: Vec<Id>,
+    qps_cqs: Vec<(QueuePair, CompletionQueue, EventChannel)>,
+    pd: ProtectionDomain,
+    grpc_client: GrpcClient,
 }
 
 impl RdmaClient{
-    pub fn new() -> RdmaClient{
-        RdmaClient{
-            id: Vec::new(),
+    pub async fn new(ip: String, port: u16, num_qp: usize) -> anyhow::Result<RdmaClient, CustomError>{
+        let grpc_address = format!("http://{}:{}",ip,port);
+        let grpc_client = GrpcClient::new(grpc_address,0 );
+        grpc_client.create_rdma_server().await.unwrap();
+        let src_ip = route_lookup(ip.clone()).await?;
+        let (gid, dev_ctx, port, gidx) = get_gid_ctx_port_from_v4_ip(&src_ip)?;
+        let gid_subnet_id = unsafe { (*gid.ibv_gid()).global.subnet_prefix };
+        let gid_interface_id = unsafe { (*gid.ibv_gid()).global.interface_id };
+        if unsafe { (*gid.ibv_gid()).global.interface_id } == 0 {
+            return Err(CustomError::new("Failed to get gid 0".to_string(), -1).into());
         }
+        info!("GID LOCAL Interface_id: {:?}", unsafe { (*gid.ibv_gid()).global.subnet_prefix });
+
+        if gid_interface_id == 0 {
+            return Err(CustomError::new("Failed to get gid 1".to_string(), -1).into());
+        }
+        let pd = create_protection_domain(dev_ctx.ibv_context())?;
+        let mut qp_list: Vec<(QueuePair, CompletionQueue, EventChannel)> = Vec::new();
+        for _ in 0..num_qp{
+            let event_channel = create_event_channel(dev_ctx.ibv_context())?;
+            let cq = create_create_completion_queue(dev_ctx.ibv_context(), event_channel.event_channel());
+            if cq == null_mut() {
+                return Err(CustomError::new("Failed to create completion queue".to_string(), -1).into());
+            }
+
+            let qp = create_queue_pair(pd.pd(), cq);
+            if qp == null_mut() {
+                return Err(CustomError::new("Failed to create queue pair".to_string(), -1).into());
+            }
+            let ret = set_qp_init_state(qp, port);
+            if ret != 0 {
+                return Err(CustomError::new("Failed to set qp init state".to_string(), ret).into());
+            }
+
+            let psn = gen_psn();
+
+            let qpn = unsafe { (*qp).qp_num };
+            let my_qp_gid = QueuePairRequest{
+                client_id: 0,
+                qpn,
+                gid_subnet_id,
+                gid_interface_id,
+                lid: 0,
+                psn,
+            };
+            let remote_qp_gid = grpc_client.create_queue_pair(my_qp_gid).await.unwrap();
+            let subnet_prefix_bytes = remote_qp_gid.gid_subnet_id.to_be_bytes();
+            let interface_id_bytes = remote_qp_gid.gid_interface_id.to_be_bytes();
+            let subnet_prefix_bytes = subnet_prefix_bytes.iter().rev().cloned().collect::<Vec<u8>>();
+            let interface_id_bytes = interface_id_bytes.iter().rev().cloned().collect::<Vec<u8>>();
+            let mut raw = [0u8; 16];
+        
+            raw[..8].copy_from_slice(&subnet_prefix_bytes);
+            raw[8..].copy_from_slice(&interface_id_bytes);
+        
+        
+            let remote_gid = ibv_gid{
+                raw,
+            };
+            connect_qp(qp, remote_gid, remote_qp_gid.qpn, remote_qp_gid.psn, psn, gidx)?;
+            qp_list.push((QueuePair(qp), CompletionQueue(cq), event_channel));
+
+        }
+
+        Ok(RdmaClient{
+            qps_cqs: qp_list,
+            pd,
+            grpc_client,
+        })
     }
 
-    pub fn connect(&mut self, ip: &str, port: &str, pd: &mut Option<ProtectionDomain>) -> anyhow::Result<(), CustomError>{
-        let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
-        let mut res: *mut rdma_addrinfo = null_mut();
-    
-        hints.ai_port_space = rdma_port_space::RDMA_PS_TCP as i32;
-        let ret =
-            unsafe { rdma_getaddrinfo(ip.as_ptr().cast(), port.as_ptr().cast(), &hints, &mut res) };
-    
-        if ret != 0 {
-            return Err(CustomError::new("rdma_getaddrinfo".to_string(), ret).into());
+    pub async fn register_memory_region(&self, size: u64) -> anyhow::Result<(MemoryRegion, MemoryRegionResponse), CustomError>{
+        let mut data = Data::new(size as usize);
+        let access_flags = ibv_access_flags::IBV_ACCESS_REMOTE_WRITE | ibv_access_flags::IBV_ACCESS_LOCAL_WRITE | ibv_access_flags::IBV_ACCESS_REMOTE_READ;
+        let addr = data.addr();
+        let mr = unsafe { ibv_reg_mr(self.pd.pd(), addr, size as usize, access_flags.0 as i32) };
+        if mr == null_mut() {
+            return Err(CustomError::new("Failed to register memory region".to_string(), -1));
         }
-    
-        let mut attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
-        let mut id: *mut rdma_cm_id = null_mut();
-        attr.cap.max_send_wr = 4096;
-        attr.cap.max_recv_wr = 4096;
-        attr.cap.max_send_sge = 15;
-        attr.cap.max_recv_sge = 15;
-        attr.cap.max_inline_data = 64;
-        attr.qp_context = id.cast();
-        attr.sq_sig_all = 0;
-
-        if pd.is_none(){
-            *pd = Some(ProtectionDomain(null_mut()));
-        }
-
-        let ret = unsafe { rdma_create_ep(&mut id, res, pd.as_ref().unwrap().pd(), &mut attr) };
-        if ret != 0 {
-            unsafe { rdma_freeaddrinfo(res); }
-            return Err(CustomError::new("rdma_create_ep".to_string(), ret).into());
-        }
-
-        let ret = unsafe { rdma_connect(id, null_mut()) };
-        if ret != 0 {
-            unsafe { rdma_disconnect(id); }
-            return Err(CustomError::new("rdma_connect".to_string(), ret).into());
-        }
-        self.id.push(Id(id));
-        Ok(())
+        let memory_region_request = MemoryRegionRequest{
+            client_id: 0,
+            size,
+        };
+        let memory_region_response = self.grpc_client.create_memory_region(memory_region_request).await.unwrap();
+        Ok((MemoryRegion(mr), memory_region_response))
     }
 
-    pub fn disconnect(&self) -> anyhow::Result<(), CustomError>{
-        println!("Disconnecting");
-        for id in &self.id{
-            let mut metadata_request = MetaData::default();
-            metadata_request.set_request_type(MetaDataRequestTypes::Disconnect);
-            let mr_addr = metadata_request.create_and_register_mr(id, Operation::SendRecv)?;
-            metadata_request.rdma_send(id, &mr_addr)?;
-        }
-        Ok(())
-    }
-
-    pub async fn write(&self, message_size: u64, volume: u64, iterations: usize) -> anyhow::Result<(), CustomError> {
-
-        let messages = volume/message_size;
-        let qps_to_use = if messages > self.id.len() as u64 { self.id.len() as u64 } else { messages };
-        let mut data_list = Vec::with_capacity(qps_to_use as usize);
-        let mut metadata_mr_map = HashMap::new();
-        let mut data = Data::new(volume as usize);
-        let data_addr = data.addr();
-        let data_len = data.len();
-        let mut rkey = None;
-        let mut remote_address = None;
-
-        let mut queues = distribute_data(volume, qps_to_use, message_size, BATCH_SIZE as u64, iterations as u64);
-        consolidate_blocks(&mut queues, BATCH_SIZE);
-        
-        for (qp_idx, _queue) in queues.iter().enumerate() {
-            let id = &self.id[qp_idx as usize];
-            if id.id().is_null(){
-                return Err(CustomError::new("id is null".to_string(), -1).into());
-            }
-            let mut metadata_request = MetaData::default();
-            metadata_request.set_request_type(MetaDataRequestTypes::WriteRequest);
-            if let Some(rkey) = rkey{
-                metadata_request.set_rkey(rkey);
-            }
-            if let Some(remote_address) = remote_address{
-                metadata_request.set_remote_address(remote_address);
-            }
-            metadata_request.set_message_size(volume);
-            let metadata_mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv)?;
-            metadata_request.rdma_send(&id, &metadata_mr_addr)?;
-            metadata_request.rdma_recv(&id, &metadata_mr_addr)?;
-            if rkey.is_none(){
-                rkey = Some(metadata_request.rkey());
-            }
-            if remote_address.is_none(){
-                remote_address = Some(metadata_request.remote_address());
-            }
-            let mr = unsafe { rdma_reg_write(id.id(), data_addr, data_len) };
-            if mr.is_null(){
-                return Err(CustomError::new("rdma_reg_write".to_string(), -1).into());
-            }
-            let mr_addr = MrAddr{mr, addr: data_addr};
-            data_list.push((mr_addr, id.clone(), metadata_request));
-            metadata_mr_map.insert(qp_idx, metadata_mr_addr);
-        }
-
-        for (qp_idx, queue) in queues.iter_mut().enumerate() {
-            let (mr_addr, _id, _metadata_request) = data_list.get_mut(qp_idx).unwrap();
-            for message_block in &mut queue.message_blocks{
-                for message in &mut message_block.messages{
-                    let addr = unsafe { (*mr_addr.mr).addr };
-                    message.sge.addr = addr.wrapping_add(message.offset as usize) as u64;
-                    message.sge.length = message.size as u32;
-                    message.sge.lkey = unsafe { (*mr_addr.mr).lkey };
-                }
-            }
-        }
-
-        let mut qp_map = HashMap::new();
-        for qp_idx in 0..qps_to_use{
-            qp_map.insert(qp_idx, Vec::new());
-        }
-
-        let mut completion_map = HashMap::new();
-        for qp_idx in 0..qps_to_use{
-            completion_map.insert(qp_idx, (Id(null_mut()), 0));
-        }
-
-        let mut id_map = HashMap::new();
-        let mut qp_idwr_map: HashMap<usize, IdWr> = HashMap::new();
-        let mut total_msg_size = 0;
-        for (qp_idx, queue) in queues.iter_mut().enumerate() {
-            let (_mr_addr, id, metadata_request) = data_list.get_mut(qp_idx as usize).unwrap();
-            id_map.insert(qp_idx, id.clone());
-            for message_block in &mut queue.message_blocks{
-                let message_block_len = message_block.messages.len();
-                for msg in &mut message_block.messages{
-                    total_msg_size += msg.size;
-                    let mut id_wr = qp_idwr_map.remove(&qp_idx).unwrap_or_else(|| IdWr::new(id.clone()));
-                    let sge = &mut msg.sge;
-                    let mut wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
-                    wr.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
-                    wr.sg_list = sge;
-                    wr.num_sge = 1;
-                    let remote_addr = metadata_request.remote_address();
-                    let remote_addr = remote_addr.wrapping_add(msg.offset);
-                    wr.wr.rdma.remote_addr = remote_addr;
-                    wr.wr.rdma.rkey = metadata_request.rkey();
-                    let current_msg_count = id_wr.wr_list.len() + 1;
-                    if current_msg_count == message_block_len {
-                        wr.send_flags =  ibv_send_flags::IBV_SEND_SIGNALED.0;
-                    } else {
-                        wr.send_flags = 0;
-                    }
-                    id_wr.add_wr(IbvSendWr(wr));
-                    if current_msg_count == message_block_len {
-                        id_wr.set_wr_ptr_list();
-                        qp_map.get_mut(&(qp_idx as u64)).unwrap().push(id_wr);
-                        id_wr = IdWr::new(id.clone());
-                    }
-                    qp_idwr_map.insert(qp_idx, id_wr);
-                }
-            }
-        }
-        
-
-        
-
-        let mut bla: u64 = 0;
-        for (_qp_idx, id_wr_list) in &qp_map{
-            for (_idwr_idx, id_wr) in id_wr_list.iter().enumerate(){
-                for (_wr_idx, wr) in id_wr.wr_list.iter().enumerate(){
-                    let sge = &wr.0.sg_list;
-                    bla += unsafe { (**sge).length as u64 };
-                }
-            }
-        }
-
-        println!("total_msg_size: {}, volume: {}, bla: {}", total_msg_size, volume, bla);
-        if bla as u64 != total_msg_size{
-            panic!("bla {} != total_msg_size {}", bla, total_msg_size);
-        }
+    pub async fn write(&self, local_mr: MemoryRegion, remote_mr: MemoryRegionResponse, iterations: usize, message_size: u64, _delay: u64) -> anyhow::Result<(), CustomError>{
+        let num_qps = self.qps_cqs.len();
+        let volume = unsafe { (*local_mr.mr()).length };
+        let mut queues = distribute_data(
+            volume as u64,
+            num_qps as u64,
+            message_size,
+            BATCH_SIZE as u64,
+            1,
+            unsafe { (*local_mr.mr()).addr as u64},
+            remote_mr.addr,
+            unsafe { (*local_mr.mr()).lkey },
+            remote_mr.rkey,
+        );
         let mut jh_list = Vec::new();
-        let iter_now = tokio::time::Instant::now();
-        for (_qp_idx, id_wr_list) in qp_map.drain(){
-            let id_wr_list = Arc::new(Mutex::new(id_wr_list));
-            let id_wr_list = id_wr_list.clone();
-            let jh = tokio::spawn(async move {
-                let random_number = rand::random::<u8>() % 200;
-                tokio::time::sleep(tokio::time::Duration::from_micros(random_number as u64)).await;
-                let mut id_wr_list = id_wr_list.lock().unwrap();
-                while let Some(mut id_wr) = id_wr_list.pop(){
-                    let first_wr = &mut id_wr.wr_list.get_mut(0).unwrap().0;
-                    let id = id_wr.id.clone();
-                    let qp = unsafe { (*id.id()).qp };
-                    let mut bad_wr = null_mut();
-                    let ret = unsafe { ibv_post_send(qp, &mut *first_wr, &mut bad_wr) };
-                    if ret != 0 {
-                        println!("ibv_post_send failed");
-                    }
-                    let _compl = unsafe { send_complete(id, 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE) }.unwrap();
+        let mut qp_idx = 0;
+        let now = std::time::Instant::now();
+        let total_volume = volume as u64 * iterations as u64;
+        let volume_per_qp = total_volume / num_qps as u64;
+        while let Some(qp) = queues.pop(){
+            let mut volume_per_qp = volume_per_qp.clone();
+            //let mut volume_per_qp_2 = volume_per_qp.clone();
+            let delay = _delay * qp_idx as u64;
+            let qps_cqs = self.qps_cqs.clone();
+            //let mut total_len = 0;
+            //let mut qp_message_size = qp.qp_message_size * iterations as u64;
+            //let mut qp_message_size_2 = qp.qp_message_size * iterations as u64;
+            println!("qp_idx: {} has {} message blocks, qp msg_size: {}", qp_idx, qp.message_blocks.len(), qp.qp_message_size);
+            //let delay = delay * qp_idx as u64;
+            let jh = tokio::spawn(async move{
+                println!("qp {} started with delay {}", qp_idx,delay);
+                if delay > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                 }
+                
+                
+                /*
+                while volume_per_qp_2 > 0 {
+                    for (msg_block_idx, msg_block) in qp.message_blocks.iter().enumerate(){
+                    
+                        println!("Message Block: {} messages {}", msg_block_idx, msg_block.message_count);
+                        let l = print_wr_ids(msg_block.wr.send_wr());
+                        total_len += l;
+                        volume_per_qp_2 -= msg_block.message_block_size;
+                    }
+                }
+                println!("Total length: {}", total_len);
+                */
+                let queue_pair = &qps_cqs[qp_idx].0;
+                let cq = &qps_cqs[qp_idx].1;
+                let event_channel = &qps_cqs[qp_idx].2;
+                let mut bad_wr = null_mut();
+                let mut required_completions = 0;
+                let mut sent_messages = 0;
+                while volume_per_qp > 0 {
+                    for (_msg_block_idx, msg_block) in qp.message_blocks.iter().enumerate(){
+                        let ret = unsafe { ibv_post_send(queue_pair.qp(), msg_block.wr.send_wr(), &mut bad_wr) };
+                        if ret != 0 {
+                            println!("ibv_post_send failed");
+                        }
+                        required_completions += 1;
+                        sent_messages += msg_block.message_count;
+                        volume_per_qp -= msg_block.message_block_size;
+                        if sent_messages as u64 >= BATCH_SIZE || required_completions as u64 >= BATCH_SIZE {
+                            let _ret = unsafe { send_complete(cq.cq(), event_channel.event_channel(), required_completions, ibv_wc_opcode::IBV_WC_RDMA_WRITE).unwrap() };
+                            //println!("0 completed {} messages, sent_messages: {}, required_completions: {}", _ret, sent_messages, required_completions);
+                            required_completions -= _ret as usize;
+                            sent_messages = 0;
+
+                        }
+                        //let _ret = unsafe { send_complete(cq.cq(), event_channel.event_channel(), 1, ibv_wc_opcode::IBV_WC_RDMA_WRITE).unwrap() };
+                    }
+                }
+                if required_completions > 0 {
+                    let _ret = unsafe { send_complete(cq.cq(), event_channel.event_channel(), required_completions, ibv_wc_opcode::IBV_WC_RDMA_WRITE).unwrap() };
+                    println!("1 completed {} messages", _ret);
+                }
+
             });
             jh_list.push(jh);
+            qp_idx += 1;
         }
         futures::future::join_all(jh_list).await;
-        
-        //futures::future::join_all(jh_list).await;
-        let iter_elapsed = iter_now.elapsed();
-        let message_size_byte = byte_unit::Byte::from_u64(volume * (iterations as u64));
+        let elapsed = now.elapsed();
+        let total_volume: u64 = volume as u64 * iterations as u64 ;
+        let message_size_byte = byte_unit::Byte::from_u64(total_volume);
         let message_size_string = format!("{message_size_byte:#}");
-        let gbit = (volume * (iterations as u64) * 8) as f64 / 1_000_000_000.0;
-        let gbps = gbit / iter_elapsed.as_secs_f64();
-        println!("total: wrote {} in {:.2}s: {:.2} Gbps",message_size_string, iter_elapsed.as_secs_f64(), gbps);
+        let gbit = (total_volume * 8) as f64 / 1_000_000_000.0;
+        let gbps = gbit / elapsed.as_secs_f64();
+        println!("total: wrote {} in {:.2}s: {:.2} Gbps",message_size_string, elapsed.as_secs_f64(), gbps);
 
-        for id in id_map.values(){
-            let mut metadata_request = MetaData::default();
-            metadata_request.set_request_type(MetaDataRequestTypes::WriteFinished);
-            let mr_addr = metadata_request.create_and_register_mr(&id, Operation::SendRecv).unwrap();
-            metadata_request.rdma_send(&id, &mr_addr).unwrap();
-        }
         Ok(())
     }
-    /*
-    pub fn send(&self, message_size: usize, iterations: usize) -> anyhow::Result<(), CustomError> {
-        let mut metadata_request = MetaData::default();
-        metadata_request.set_request_type(MetaDataRequestTypes::SendRequest);
-        metadata_request.set_message_size(message_size as u32);
-        metadata_request.set_iterations(iterations as u32);
-        let mr_ar = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
-        metadata_request.rdma_send(&self.id, &mr_ar)?;
-        metadata_request.rdma_recv(&self.id, &mr_ar)?;
-        match metadata_request.get_request_type(){
-            MetaDataRequestTypes::SendResponse => {
-                let mut data = Data::new(message_size);
-                let data_mr_addr = data.create_and_register_mr(&self.id, Operation::SendRecv)?;
-                data.rdma_send_data(&self.id, &data_mr_addr, iterations)?;
-                println!("Send finished");
-                metadata_request.set_request_type(MetaDataRequestTypes::SendFinished);
-                metadata_request.rdma_send(&self.id, &mr_ar)?;
-            },
-            _ => {
-                return Err(CustomError::new("unexpected request type".to_string(), 0).into());
-            }
-        }
-        Ok(())
-    }
-
-    pub fn read(&self, message_size: usize, iterations: usize) -> anyhow::Result<(), CustomError> {
-        let mut metadata_request = MetaData::default();
-        metadata_request.set_request_type(MetaDataRequestTypes::ReadRequest);
-        metadata_request.set_message_size(message_size as u32);
-        let metadata_mr_addr = metadata_request.create_and_register_mr(&self.id, Operation::SendRecv)?;
-        metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
-        metadata_request.rdma_recv(&self.id, &metadata_mr_addr)?;
-        match metadata_request.get_request_type(){
-            MetaDataRequestTypes::ReadResponse => {
-                let mut data = Data::new(message_size);
-                data.create_and_register_mr(&self.id, Operation::Read)?;
-                data.rdma_read(&self.id, metadata_request.rkey(), metadata_request.remote_address(), iterations)?;
-                println!("RDMA Read finished");
-                metadata_request.set_request_type(MetaDataRequestTypes::ReadFinished);
-                metadata_request.rdma_send(&self.id, &metadata_mr_addr)?;
-            },
-            _ => {
-                return Err(CustomError::new("unexpected request type".to_string(), 0).into());
-            }  
-        }
-        Ok(())
-    }
-    */
     
 }
 
-pub fn print_wr_ids(start: &ibv_send_wr) {
+pub fn print_wr_ids(start: *mut ibv_send_wr) -> u64{
     let mut current = start;
-
-
-    while !current.next.is_null() {
-        let sge = &current.sg_list;
+    let mut total_len = 0;
+    while !unsafe { (*current).next.is_null() } {
+        let sge = & unsafe { (*current).sg_list };
         let sge_len = unsafe { (**sge).length as u64 };
+        total_len += sge_len;
         let sge_addr = unsafe { (**sge).addr };
-        let remote_addr = unsafe { current.wr.rdma.remote_addr };
-        println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}", current.wr_id, sge_addr, sge_len, remote_addr);
-
-        unsafe {
-            // Move to the next element
-            current = &*current.next;
-        }
+        let remote_addr = unsafe { (*current).wr.rdma.remote_addr };
+        let wr_send_flag = unsafe { (*current).send_flags };
+        println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}, send_flag {}", unsafe { (*current).wr_id }, sge_addr, sge_len, remote_addr, wr_send_flag);
+        current = unsafe { (*current).next };
 
     }
-    let sge = &current.sg_list;
+    let sge = &unsafe { (*current).sg_list };
     let sge_len = unsafe { (**sge).length as u64 };
+    total_len += sge_len;
     let sge_addr = unsafe { (**sge).addr };
-    let remote_addr = unsafe { current.wr.rdma.remote_addr };
-    println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}", current.wr_id, sge_addr, sge_len, remote_addr);
+    let remote_addr = unsafe { (*current).wr.rdma.remote_addr };
+    let wr_send_flag = unsafe { (*current).send_flags };
+    println!("wr_id: {}, sge_addr: {}, sge_len: {}, remote_addr: {}, send_flag {}", unsafe { (*current).wr_id }, sge_addr, sge_len, remote_addr, wr_send_flag);
+    total_len
 }
 
-#[derive(Clone)]
-struct QueuePair {
+struct Qp {
     message_blocks: Vec<MessageBlock>,
+    qp_message_size: u64,
 }
 
-#[derive(Clone)]
+impl Drop for Qp {
+    fn drop(&mut self) {
+        for message_block in &self.message_blocks {
+            unsafe {
+                let _ = Box::from_raw((*message_block.wr.send_wr()).sg_list);
+            }
+            unsafe {
+                let _ = Box::from_raw(message_block.wr.send_wr());
+            }
+        }
+    }
+}
+
 struct MessageBlock {
-    messages: Vec<Message>,
+    message_count: usize,
+    wr: IbvSendWr,
+    message_block_size: u64,
 }
 
-#[derive(Clone)]
-struct Message {
-    sge: ibv_sge,
-    offset: u64,
-    size: u64,
-}
-
-fn distribute_data(volume: u64, queue_pairs: u64, max_message_size: u64, max_msg_per_block: u64, iterator_factor: u64) -> Vec<QueuePair> {
+fn distribute_data(
+    volume: u64,
+    queue_pairs: u64,
+    max_message_size: u64,
+    max_msg_per_block: u64,
+    iterator_factor: u64,
+    local_mr_start_addr: u64,
+    remote_mr_start_addr: u64,
+    lkey: u32,
+    rkey: u32,
+) -> Vec<Qp> {
     // Calculate the base size for each queue pair
     let base_size = volume / queue_pairs;
     let remainder = volume % queue_pairs;
 
     // Initialize queues
-    let mut queues: Vec<QueuePair> = vec![QueuePair { message_blocks: Vec::new() }; queue_pairs as usize];
-
+    let mut queues = Vec::new();
+    for _ in 0..queue_pairs {
+        queues.push(Qp {
+            message_blocks: Vec::new(),
+            qp_message_size: 0,
+        });
+    }
     for factor in 0..iterator_factor {
         let mut current_offset = factor * volume;
 
@@ -340,64 +277,70 @@ fn distribute_data(volume: u64, queue_pairs: u64, max_message_size: u64, max_msg
                 size += 1; // Distribute the remainder
             }
 
-            let mut current_block = MessageBlock { messages: Vec::new() };
+            let mut current_block = MessageBlock {
+                message_count: 0,
+                wr: IbvSendWr(ptr::null_mut()),
+                message_block_size: 0,
+            };
             let mut current_block_size = 0;
+            let mut last_wr: *mut ibv_send_wr = ptr::null_mut();
 
             while size > 0 {
                 let message_size = if size > max_message_size { max_message_size } else { size };
+                let sge = ibv_sge{
+                    addr: (local_mr_start_addr + (current_offset % volume)) as u64,
+                    length: message_size as u32,
+                    lkey,
+                };
+                current_block.message_block_size += message_size;
+                let sge = Box::new(sge);
+                let sge_ptr: *mut ibv_sge = Box::into_raw(sge);
+                let mut wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+                wr.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
+                wr.sg_list = sge_ptr;
+                wr.num_sge = 1;
+                wr.wr.rdma.remote_addr = remote_mr_start_addr + (current_offset % volume);
+                wr.wr.rdma.rkey = rkey;
+                if size == message_size {
+                    wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+                } else {
+                    wr.send_flags = 0;
+                }
+                let wr = Box::new(wr);
+                let wr_ptr: *mut ibv_send_wr = Box::into_raw(wr);
+                // If there is a previous WR, set its next to point to the current WR
+                if !last_wr.is_null() {
+                    unsafe {
+                        (*last_wr).next = wr_ptr; // Link the previous WR to the current WR
+                    }
+                } else {
+                    current_block.wr.0 = wr_ptr;
+                }
+                last_wr = wr_ptr;
 
-                current_block.messages.push(Message {
-                    offset: current_offset % volume,
-                    size: message_size,
-                    sge: unsafe { std::mem::zeroed::<ibv_sge>() }
-                });
-
+                current_block.message_count += 1;
                 current_offset = (current_offset + message_size) % volume;
                 current_block_size += 1;
                 size -= message_size;
 
                 if current_block_size >= max_msg_per_block {
                     queues[i as usize].message_blocks.push(current_block);
-                    current_block = MessageBlock { messages: Vec::new() };
+                    current_block = MessageBlock {
+                        message_count: 0,
+                        wr: IbvSendWr(ptr::null_mut()),
+                        message_block_size: 0,
+                    };
+                    last_wr = ptr::null_mut();
                     current_block_size = 0;
                 }
             }
-
-            if !current_block.messages.is_empty() {
+            
+            if current_block.message_count > 0 {
+                queues[i as usize].qp_message_size += current_block.message_block_size;
                 queues[i as usize].message_blocks.push(current_block);
             }
         }
     }
 
     queues
-}
-
-fn consolidate_blocks(queues: &mut Vec<QueuePair>, max_msg_per_block: u64) {
-    for queue in queues.iter_mut() {
-        let mut new_blocks = Vec::new();
-        let mut current_block = MessageBlock { messages: Vec::new() };
-
-        for block in &queue.message_blocks {
-            for message in &block.messages {
-                if current_block.messages.len() as u64 >= max_msg_per_block {
-                    new_blocks.push(current_block);
-                    current_block = MessageBlock { messages: Vec::new() };
-                }
-                current_block.messages.push(message.clone());
-            }
-        }
-
-        if !current_block.messages.is_empty() {
-            new_blocks.push(current_block);
-        }
-
-        queue.message_blocks = new_blocks;
-    }
-}
-
-fn aggregate_total_size(queues: &Vec<QueuePair>) -> u64 {
-    queues.iter().flat_map(|queue| &queue.message_blocks)
-          .flat_map(|block| &block.messages)
-          .map(|message| message.size)
-          .sum()
 }

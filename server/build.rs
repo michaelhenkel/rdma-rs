@@ -9,5 +9,5 @@ fn main() {
         &["../protos/connection_manager.proto"],
         &["../protos"]
     )
-    .unwrap();
+    .unwrap(); 
 }

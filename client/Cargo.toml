@@ -19,6 +19,12 @@ tokio-stream = "0.1.15"
 byte-unit = "5.1.4"
 futures = "0.3.30"
 rand = "0.8.5"
+byteorder = "1.5.0"
+pnet = "0.35.0"
+ipnetwork = "0.20.0"
+log = "0.4.22"
+env_logger = "0.11.5"
+
 
 [build-dependencies]
 tonic-build = "0.11.0"

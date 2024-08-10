@@ -18,6 +18,11 @@ tokio-stream = "0.1.15"
 futures = "0.3.30"
 portpicker = "0.1.1"
 async-stream = "0.3.5"
+byteorder = "1.5.0"
+pnet = "0.35.0"
+log = "0.4.22"
+env_logger = "0.11.5"
+
 
 [build-dependencies]
 tonic-build = "0.11.0"

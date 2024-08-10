@@ -1,9 +1,10 @@
 
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{ptr::null_mut, sync::Arc};
 use common::*;
+use rdma_sys::{ibv_access_flags, ibv_reg_mr};
 use tokio::sync::RwLock;
 
-use crate::qp::Qp;
+use crate::{connection_manager::connection_manager::{MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse}, qp::Qp};
 
 
 
@@ -25,43 +26,36 @@ impl RdmaServer{
         }
     }
 
-    pub async fn run(self) -> anyhow::Result<()>{
+    pub async fn run(self) -> anyhow::Result<(), CustomError>{
         let mut rx = self.rx.write().await;
-        let qps: Arc<RwLock<HashMap<u16, Qp>>> = Arc::new(RwLock::new(HashMap::new()));
-        let mut pd = None;
-        let data: Arc<Mutex<Option<Data>>> = Arc::new(Mutex::new(None));
+        let mut qp_list: Vec<Qp> = Vec::new();
+        let src_ip: std::net::Ipv4Addr = self.address.parse().unwrap();
+        let (gid, dev_ctx, port, gidx) = get_gid_ctx_port_from_v4_ip(&src_ip)?;
+        let pd = create_protection_domain(dev_ctx.ibv_context())?;
+
         while let Some(rdma_server_command) = rx.recv().await{
-            let data = data.clone();
+            let pd = pd.clone();
             match rdma_server_command{
-                RdmaServerCommand::Listen{port, tx} => {
-                    let qps = qps.write().await;
-                    let qp = qps.get(&port).unwrap();
-                    let mut qp = qp.clone();
-                    tokio::spawn(async move{
-                        loop {
-                            let ret = qp.listen(data.clone()).await.unwrap();
-                            if ret == 0 {
-                                break;
-                            }
-                        }
-                        tx.send(()).unwrap();
-                    });
-                },
-                RdmaServerCommand::ConnectQp { port } => {
-                    let qps = qps.clone();
-                    tokio::spawn(async move{
-                        let mut qps = qps.write().await;
-                        let qp = qps.get_mut(&port).unwrap();
-                        qp.wait_for_connection().await.unwrap();
-                    });
+                RdmaServerCommand::CreateMemoryRegion { memory_region_request, tx } => {
+                    let mut data = Data::new(memory_region_request.size as usize);
+                    let access_flags = ibv_access_flags::IBV_ACCESS_REMOTE_WRITE | ibv_access_flags::IBV_ACCESS_LOCAL_WRITE | ibv_access_flags::IBV_ACCESS_REMOTE_READ;
+                    let addr = data.addr();
+                    let mr = unsafe { ibv_reg_mr(pd.pd(), addr, memory_region_request.size as usize, access_flags.0 as i32) };
+                    if mr == null_mut() {
+                        return Err(CustomError::new("Failed to register memory region".to_string(), -1));
+                    }
+                    let memory_region_response = MemoryRegionResponse{
+                        addr: unsafe { (*mr).addr as u64 },
+                        rkey: unsafe { (*mr).rkey },
+                    };
+                    tx.send(memory_region_response).unwrap();
+
                 }
-                RdmaServerCommand::CreateQp{tx} => {
-                    let address = self.address.clone();
-                    let qp = Qp::new(address, &mut pd).unwrap();
-                    let port = qp.port;
-                    let mut qps = qps.write().await;
-                    qps.insert(port, qp);
-                    tx.send(port).unwrap();
+                RdmaServerCommand::CreateQueuePair { qp_request, tx } => {
+                    let mut qp = Qp::new(pd, dev_ctx.clone(), gid.clone(), port, gidx);
+                    let qp_gid = qp.connect(qp_request)?;
+                    qp_list.push(qp);
+                    tx.send(qp_gid).unwrap();
                 }
             }
         }
@@ -81,33 +75,26 @@ impl RdmaServerClient{
             tx
         }
     }
-    pub async fn listen(&mut self, port: u16) -> anyhow::Result<()>{
+    pub async fn create_queue_pair(&mut self, qp_request: QueuePairRequest) -> anyhow::Result<QueuePairResponse>{
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(RdmaServerCommand::Listen{port, tx}).await.unwrap();
-        rx.await.unwrap();
-        Ok(())
-    }
-    pub async fn create_qp(&mut self) -> anyhow::Result<u16>{
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(RdmaServerCommand::CreateQp{tx}).await.unwrap();
+        self.tx.send(RdmaServerCommand::CreateQueuePair{qp_request, tx}).await.unwrap();
         Ok(rx.await.unwrap())
     }
-    pub async fn connect_qp(&mut self, port: u16) -> anyhow::Result<()>{
-        self.tx.send(RdmaServerCommand::ConnectQp{port}).await.unwrap();
-        Ok(())
+    pub async fn create_memory_region(&mut self, memory_region_request: MemoryRegionRequest) -> anyhow::Result<MemoryRegionResponse>{
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(RdmaServerCommand::CreateMemoryRegion{memory_region_request, tx}).await.unwrap();
+        Ok(rx.await.unwrap())
     }
 
 }
 
 pub enum RdmaServerCommand{
-    Listen{
-        port: u16,
-        tx: tokio::sync::oneshot::Sender<()>
+    CreateQueuePair{
+        qp_request: QueuePairRequest,
+        tx: tokio::sync::oneshot::Sender<QueuePairResponse>
     },
-    CreateQp{
-        tx: tokio::sync::oneshot::Sender<u16>
-    },
-    ConnectQp{
-        port: u16,
+    CreateMemoryRegion{
+        memory_region_request: MemoryRegionRequest,
+        tx: tokio::sync::oneshot::Sender<MemoryRegionResponse>
     }
 }

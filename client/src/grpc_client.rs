@@ -1,5 +1,5 @@
 use crate::connection_manager::connection_manager::{
-    connection_manager_client::ConnectionManagerClient, ConnectQpRequest, ListenRequest, QpRequest, RdmaServerRequest
+    connection_manager_client::ConnectionManagerClient, MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse, RdmaServerRequest
 };
 use tonic::Request;
 
@@ -17,29 +17,21 @@ impl GrpcClient{
         let _response = client.create_rdma_server(request).await.unwrap().into_inner();
         Ok(())
     }
-    pub async fn listen(&self, port: u16) -> anyhow::Result<()>{
+    pub async fn create_queue_pair(&self, mut qp_request: QueuePairRequest) -> anyhow::Result<QueuePairResponse>{
         let address = self.address.clone();
         let client_id = self.client_id;
+        qp_request.client_id = client_id;
         let mut client = ConnectionManagerClient::connect(address).await.unwrap();
-        let request = Request::new(ListenRequest{client_id, port: port as u32});
-        let _response = client.qp_listen(request).await.unwrap().into_inner();
-        Ok(())
+        let request = Request::new(qp_request);
+        let response_qp_gid = client.create_queue_pair(request).await.unwrap().into_inner();
+        Ok(response_qp_gid)
     }
-    pub async fn create_qp(&self) -> anyhow::Result<u16>{
+    pub async fn create_memory_region(&self, memory_region_request: MemoryRegionRequest) -> anyhow::Result<MemoryRegionResponse>{
         let address = self.address.clone();
-        let client_id = self.client_id;
         let mut client = ConnectionManagerClient::connect(address).await.unwrap();
-        let request = Request::new(QpRequest{client_id});
-        let response = client.create_qp(request).await.unwrap().into_inner();
-        Ok(response.port as u16)
-    }
-    pub async fn request_qp_connection(&self, port: u16) -> anyhow::Result<()>{
-        let address = self.address.clone();
-        let client_id = self.client_id;
-        let mut client = ConnectionManagerClient::connect(address).await.unwrap();
-        let request = Request::new(ConnectQpRequest{client_id, port: port as u32});
-        let _response = client.request_qp_connection(request).await.unwrap().into_inner();
-        Ok(())
+        let request = Request::new(memory_region_request);
+        let response = client.create_memory_region(request).await.unwrap().into_inner();
+        Ok(response)
     }
     pub fn new(address: String, client_id: u32) -> Self{
         GrpcClient{
