@@ -14,25 +14,48 @@ pub struct RdmaClient{
 }
 
 impl RdmaClient{
-    pub async fn new(ip: String, port: u16, num_qp: usize) -> anyhow::Result<RdmaClient, CustomError>{
+    pub async fn new(ip: String, port: u16, num_qp: usize, family: Family, device_name: Option<String>, mode: Mode) -> anyhow::Result<RdmaClient, CustomError>{
+        let gid_table = generate_gid_table(device_name)?;
         let grpc_address = format!("http://{}:{}",ip,port);
-        let grpc_client = GrpcClient::new(grpc_address,0 );
+        let grpc_client = GrpcClient::new(grpc_address,0, mode.clone(), family.clone(), num_qp as u32);
         grpc_client.create_rdma_server().await.unwrap();
-        let src_ip = route_lookup(ip.clone()).await?;
-        let (gid, dev_ctx, port, gidx) = get_gid_ctx_port_from_v4_ip(&src_ip)?;
-        let gid_subnet_id = unsafe { (*gid.ibv_gid()).global.subnet_prefix };
-        let gid_interface_id = unsafe { (*gid.ibv_gid()).global.interface_id };
-        if unsafe { (*gid.ibv_gid()).global.interface_id } == 0 {
-            return Err(CustomError::new("Failed to get gid 0".to_string(), -1).into());
-        }
-        info!("GID LOCAL Interface_id: {:?}", unsafe { (*gid.ibv_gid()).global.subnet_prefix });
 
-        if gid_interface_id == 0 {
-            return Err(CustomError::new("Failed to get gid 1".to_string(), -1).into());
-        }
+        let dev_ctx = gid_table.context.clone();
         let pd = create_protection_domain(dev_ctx.ibv_context())?;
+
+
+        let ip_opt = match mode{
+            Mode::SingleIp => Some(ip.clone()),
+            Mode::MultiIp => None,
+        };
+    
+        let (gid_list, single_gid) = get_single_or_multi_gid(gid_table, family, num_qp, ip_opt).await?;
         let mut qp_list: Vec<(QueuePair, CompletionQueue, EventChannel)> = Vec::new();
-        for _ in 0..num_qp{
+        for qp_idx in 0..num_qp{
+
+            let gid_entry = if let Some(gid) = single_gid.as_ref(){
+                gid
+            } else {
+                let gid = gid_list.get(qp_idx).unwrap();
+                gid
+            };
+
+            let gid = &gid_entry.gid;
+            let port = gid_entry.port;
+            let gidx = gid_entry.gidx;
+
+
+            let gid_subnet_id = unsafe { (*gid.ibv_gid()).global.subnet_prefix };
+            let gid_interface_id = unsafe { (*gid.ibv_gid()).global.interface_id };
+            if unsafe { (*gid.ibv_gid()).global.interface_id } == 0 {
+                return Err(CustomError::new("Failed to get gid 0".to_string(), -1).into());
+            }
+            info!("GID LOCAL Interface_id: {:?}", unsafe { (*gid.ibv_gid()).global.subnet_prefix });
+    
+            if gid_interface_id == 0 {
+                return Err(CustomError::new("Failed to get gid 1".to_string(), -1).into());
+            }
+
             let event_channel = create_event_channel(dev_ctx.ibv_context())?;
             let cq = create_create_completion_queue(dev_ctx.ibv_context(), event_channel.event_channel());
             if cq == null_mut() {

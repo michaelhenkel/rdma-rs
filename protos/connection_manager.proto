@@ -27,6 +27,16 @@ message QueuePairRequest {
     uint32 psn = 6;
 }
 
+enum Family {
+    INET = 0;
+    INET6 = 1;
+}
+
+enum Mode{
+    SINGLE = 0;
+    MULTI = 1;
+}
+
 message QueuePairResponse {
     uint32 qpn = 1;
     uint64 gid_subnet_id = 2;
@@ -37,6 +47,9 @@ message QueuePairResponse {
 
 message RdmaServerRequest {
     uint32 client_id = 1;
+    Family family = 2;
+    Mode mode = 3;
+    uint32 qpns = 4;
 }
 
 message StatusResponse{

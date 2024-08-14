@@ -15,6 +15,8 @@ struct Args{
     address: String,
     #[clap(short, long)]
     port: u16,
+    #[clap(short, long)]
+    device_name: Option<String>,
 }
 
 #[tokio::main]
@@ -24,7 +26,7 @@ async fn main() -> anyhow::Result<(), CustomError> {
 
     let mut jh_list = Vec::new();
 
-    let mut sm = ServerManager::new(args.address.clone());
+    let mut sm = ServerManager::new(args.address.clone(), args.device_name.clone());
     let sm_client = sm.client.clone();
     let jh = tokio::spawn(async move{
         sm.run().await;

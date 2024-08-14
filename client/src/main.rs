@@ -21,8 +21,12 @@ struct Args{
     qps: u32,
     #[clap(short, long, default_value = "1MB")]
     volume: String,
-    #[clap(long, default_value = "1")]
-    delay: u64,
+    #[clap(short, long)]
+    device: Option<String>,
+    #[clap(short, long)]
+    family: Family,
+    #[clap(long, default_value = "SingleIp")]
+    mode: Mode,
 }
 
 
@@ -36,9 +40,9 @@ async fn main() -> anyhow::Result<(), CustomError> {
     let volume = volume.as_u64();
     let msg_size = byte_unit::Byte::from_str(args.msg_size.as_str()).map_err(|_| CustomError::new("wrong byte unit".to_string(), -1))?;
     let msg_size = msg_size.as_u64();
-    let rdma_client = RdmaClient::new(args.server.clone(), args.port, args.qps as usize).await?;
+    let rdma_client = RdmaClient::new(args.server.clone(), args.port, args.qps as usize, args.family, args.device, args.mode).await?;
     let (local_mr, remote_mr) = rdma_client.register_memory_region(volume).await?;
-    rdma_client.write(local_mr, remote_mr, args.iterations, msg_size, args.delay).await?;
+    rdma_client.write(local_mr, remote_mr, args.iterations, msg_size, 0).await?;
     println!("Client done");
     Ok(())
 }

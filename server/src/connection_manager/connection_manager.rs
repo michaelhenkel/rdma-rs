@@ -50,12 +50,70 @@ pub struct QueuePairResponse {
 pub struct RdmaServerRequest {
     #[prost(uint32, tag = "1")]
     pub client_id: u32,
+    #[prost(enumeration = "Family", tag = "2")]
+    pub family: i32,
+    #[prost(enumeration = "Mode", tag = "3")]
+    pub mode: i32,
+    #[prost(uint32, tag = "4")]
+    pub qpns: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StatusResponse {
     #[prost(string, tag = "1")]
     pub msg: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Family {
+    Inet = 0,
+    Inet6 = 1,
+}
+impl Family {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Family::Inet => "INET",
+            Family::Inet6 => "INET6",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "INET" => Some(Self::Inet),
+            "INET6" => Some(Self::Inet6),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Mode {
+    Single = 0,
+    Multi = 1,
+}
+impl Mode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Mode::Single => "SINGLE",
+            Mode::Multi => "MULTI",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SINGLE" => Some(Self::Single),
+            "MULTI" => Some(Self::Multi),
+            _ => None,
+        }
+    }
 }
 /// Generated client implementations.
 pub mod connection_manager_client {

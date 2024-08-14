@@ -4,8 +4,8 @@ use crate::{
         ConnectionManager,
         ConnectionManagerServer
     }, MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse, RdmaServerRequest, StatusResponse
-},
-server_manager::ServerManagerClient};
+}, server_manager::ServerManagerClient};
+use common::{Family, Mode};
 use tonic::{transport::Server, Request, Response, Status};
 
 
@@ -44,7 +44,10 @@ impl ConnectionManager for GrpcServer {
     ) -> Result<Response<StatusResponse>, Status> {
         let connection_request = request.into_inner();
         let mut client = self.server_manager_client.clone();
-        match client.create_rdma_server(connection_request.client_id).await{
+        let mode = Mode::from(connection_request.mode);
+        let family = Family::from(connection_request.family);
+        let qpns = connection_request.qpns;
+        match client.create_rdma_server(connection_request.client_id, family, mode, qpns).await{
             Ok(_) => {},
             Err(e) => {
                 return Err(Status::internal(e.to_string()));

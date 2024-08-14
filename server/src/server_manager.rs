@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{connection_manager::connection_manager::{MemoryRegionRequest, MemoryRegionResponse, QueuePairRequest, QueuePairResponse}, rdma_server::{RdmaServer, RdmaServerClient}};
+use common::{Family, Mode};
 use tokio::sync::RwLock;
 
 pub struct ServerManager{
@@ -8,17 +9,19 @@ pub struct ServerManager{
     rx: Arc<RwLock<tokio::sync::mpsc::Receiver<ServerManagerCommand>>>,
     address: String,
     rdma_server_clients: Arc<RwLock<HashMap<u32, RdmaServerClient>>>,
+    device_name: Option<String>,
 }
 
 impl ServerManager{
-    pub fn new(address: String) -> Self{
+    pub fn new(address: String, device_name: Option<String>) -> Self{
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let client = ServerManagerClient::new(tx);
         ServerManager{
             client,
             rx: Arc::new(RwLock::new(rx)),
             address,
-            rdma_server_clients: Arc::new(RwLock::new(HashMap::new()))
+            rdma_server_clients: Arc::new(RwLock::new(HashMap::new())),
+            device_name,
         }
     }
 
@@ -34,8 +37,8 @@ impl ServerManager{
                     let memory_region_response = rdma_server_client.create_memory_region(memory_region).await.unwrap();
                     tx.send(Ok(memory_region_response)).unwrap();
                 }
-                ServerManagerCommand::CreateRdmaServer{client_id, tx} => {
-                    let rdma_server = RdmaServer::new(self.address.clone());
+                ServerManagerCommand::CreateRdmaServer{client_id, family, mode, qpns, tx} => {
+                    let rdma_server = RdmaServer::new(self.address.clone(), self.device_name.clone(), family, mode, qpns).await.unwrap();
                     let rdma_server_client = rdma_server.client.clone();
                     tokio::spawn(async move{
                         rdma_server.run().await.unwrap();
@@ -66,9 +69,9 @@ impl ServerManagerClient{
             tx
         }
     }
-    pub async fn create_rdma_server(&mut self, client_id: u32) -> anyhow::Result<()>{
+    pub async fn create_rdma_server(&mut self, client_id: u32, family: Family, mode: Mode, qpns: u32) -> anyhow::Result<()>{
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(ServerManagerCommand::CreateRdmaServer{client_id, tx}).await.unwrap();
+        self.tx.send(ServerManagerCommand::CreateRdmaServer{client_id, family, mode, qpns, tx}).await.unwrap();
         rx.await.unwrap()
     }
     // client.exchange_qp_gid(connection_request.client_id, connection_request.qpn, connection_request.gid_subnet_id, connection_request.gid_interface_id).await.unwrap();
@@ -89,6 +92,9 @@ impl ServerManagerClient{
 pub enum ServerManagerCommand{
     CreateRdmaServer{
         client_id: u32,
+        family: Family,
+        mode: Mode,
+        qpns: u32,
         tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>
     },
     CreateQueuePair{

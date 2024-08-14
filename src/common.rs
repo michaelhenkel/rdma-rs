@@ -1,4 +1,5 @@
-use std::{collections::BTreeMap, ffi::CStr, fmt::Display, fs, net::{Ipv4Addr, Ipv6Addr}, path::PathBuf, ptr::{self, null_mut}, str::FromStr};
+use std::{collections::{BTreeMap, HashMap}, ffi::CStr, fmt::Display, fs, net::{IpAddr, Ipv4Addr, Ipv6Addr}, path::PathBuf, ptr::{self, null_mut}, str::FromStr};
+use clap::ValueEnum;
 use futures::TryStreamExt;
 use libc::{c_int, c_void};
 use netlink_packet_route::{address::AddressAttribute, route::{RouteAddress, RouteAttribute, RouteMessage}};
@@ -6,6 +7,7 @@ use rdma_sys::*;
 use log::info;
 use rtnetlink::{new_connection, IpVersion};
 
+pub mod connection_manager;
 const BATCH_SIZE: usize = 2000;
 
 #[derive(Debug)]
@@ -772,7 +774,6 @@ pub fn connect_qp(qp: *mut ibv_qp, gid: ibv_gid, qpn: u32, psn: u32, my_psn: u32
     qp_attr.ah_attr.src_path_bits = 0;
     qp_attr.ah_attr.port_num = 1;
     qp_attr.ah_attr.dlid = 0;
-    qp_attr.ah_attr.static_rate = 2;
     qp_attr.ah_attr.grh.dgid = gid;
     qp_attr.ah_attr.is_global = 1;
     qp_attr.ah_attr.grh.sgid_index = gidx as u8;
@@ -902,6 +903,214 @@ pub fn gid_to_ipv6_string(gid: ibv_gid) -> Option<Ipv6Addr> {
     }
 }
 
+
+pub struct GidTable{
+    pub context: IbvContext,
+    pub v4_table: HashMap<Ipv4Addr, GidEntry>,
+    pub v6_table: HashMap<Ipv6Addr, GidEntry>,
+}
+
+impl GidTable{
+    pub fn add_entry(&mut self, gid_entry: GidEntry, address: IpAddr){
+        match address{
+            IpAddr::V4(v4) => {
+                self.v4_table.insert(v4, gid_entry);
+            },
+            IpAddr::V6(v6) => {
+                self.v6_table.insert(v6, gid_entry);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GidEntry{
+    pub gid: IbvGid,
+    pub port: u8,
+    pub gidx: i32,
+}
+
+#[derive(Clone, ValueEnum)]
+pub enum Family{
+    V4,
+    V6
+}
+
+
+
+
+impl Into<i32> for Family{
+    fn into(self) -> i32{
+        match self{
+            Family::V4 => 0,
+            Family::V6 => 1,
+        }
+    }
+}
+
+
+
+impl From<i32> for Family{
+    fn from(family: i32) -> Family{
+        match family{
+            0 => Family::V4,
+            1 => Family::V6,
+            _ => Family::V4,
+        }
+    }
+}
+
+#[derive(Clone, ValueEnum)]
+pub enum Mode{
+    SingleIp,
+    MultiIp,
+}
+
+impl Into<i32> for Mode{
+    fn into(self) -> i32{
+        match self{
+            Mode::SingleIp => 0,
+            Mode::MultiIp => 1,
+        }
+    }
+}
+
+impl From<i32> for Mode{
+    fn from(mode: i32) -> Mode{
+        match mode{
+            0 => Mode::SingleIp,
+            1 => Mode::MultiIp,
+            _ => Mode::SingleIp,
+        }
+    }
+}
+
+pub fn generate_gid_table(dev_name: Option<String>) -> anyhow::Result<GidTable,CustomError>{
+
+    let mut gid_table = GidTable{
+        context: IbvContext(null_mut()),
+        v4_table: HashMap::new(),
+        v6_table: HashMap::new(),
+    };
+    let device_list: *mut *mut ibv_device = unsafe { __ibv_get_device_list(null_mut()) };
+
+    // get the number of elements in the list
+    let mut num_devices = 0;
+    while !unsafe { *device_list.offset(num_devices) }.is_null() {
+        num_devices += 1;
+    }
+    if num_devices == 0 {
+        return Err(CustomError::new("ibv_get_device_list".to_string(), -1).into());
+    }
+    for i in 0..num_devices {
+        let device = unsafe { *device_list.offset(i as isize) };
+        let device_ctx = unsafe { ibv_open_device(device) };
+        if device_ctx == null_mut() {
+            return Err(CustomError::new("Failed to open device".to_string(), -1));
+        }
+        let device_name = unsafe { CStr::from_ptr((*device).name.as_ptr()) };
+        if let Some(dev_name) = dev_name.clone() {
+            if dev_name.as_str() != device_name.to_str().unwrap(){
+                continue;
+            }
+        }
+        gid_table.context = IbvContext(device_ctx);
+        let mut device_attr = unsafe { std::mem::zeroed::<ibv_device_attr>() };
+        let ret = unsafe { ibv_query_device(device_ctx, &mut device_attr) };
+        if ret != 0 {
+            return Err(CustomError::new("Failed to query device".to_string(), ret));
+        }
+        let num_ports = device_attr.phys_port_cnt;
+        for i in 1..=num_ports {
+            let mut port_attr = unsafe { std::mem::zeroed::<ibv_port_attr>() };
+            let ret = unsafe { ___ibv_query_port(device_ctx, i, &mut port_attr) };
+            if ret != 0 {
+                return Err(CustomError::new("Failed to query port".to_string(), ret));
+            }
+            let gid_tbl_len = port_attr.gid_tbl_len;
+            for j in 0..gid_tbl_len {
+                let mut gid: ibv_gid = unsafe { std::mem::zeroed() };
+                unsafe { ibv_query_gid(device_ctx, i, j, &mut gid) };
+                let address = if let Some(gid_v6) = gid_to_ipv6_string(gid){
+                    match gid_v6.to_ipv4(){
+                        Some(gid_v4) => {
+                            Some(IpAddr::V4(gid_v4))
+                        },
+                        None => {
+                            let segments = gid_v6.segments();
+                            if (segments[0] & 0xffc0) != 0xfe80 {
+                                Some(IpAddr::V6(gid_v6))
+                            } else {
+                                None
+                            }
+                        },
+                    }
+                } else {
+                    None
+                        
+                };
+                if let Some(address) = address{
+                    match read_gid_type(device_name.to_str().unwrap(), i, j)?{
+                        GidType::ROCEv2 => {
+                            let gid = Box::new(gid);
+                            let gid_ptr = Box::into_raw(gid);
+                            let gid_entry = GidEntry{
+                                gid: IbvGid(gid_ptr),
+                                port: i,
+                                gidx: j,
+                            };
+                            gid_table.add_entry(gid_entry, address);
+
+                        },
+                        GidType::RoCEv1 => {
+
+                        },
+                    }
+                }
+            }
+        }
+    }
+    Ok(gid_table)
+}
+
+
+pub async fn get_single_or_multi_gid(mut gid_table: GidTable, family: Family, num_qp: usize, ip: Option<String>) -> anyhow::Result<(Vec<GidEntry>, Option<GidEntry>
+), CustomError> {
+    let mut gid_list = Vec::new();
+    let mut single_gid = None;
+
+    if let Some(ip) = ip{
+        let src_ip = route_lookup(ip).await?;
+        match family{
+            Family::V4 => {
+                if let Some(gid) = gid_table.v4_table.remove(&src_ip){
+                    single_gid = Some(gid);
+                }
+            },
+            Family::V6 => {},
+        }
+        if single_gid.is_none(){
+            return Err(CustomError::new("Failed to get single gid".to_string(), -1).into());
+        }
+    } else {
+        match family{
+            Family::V4 => {
+                for (_, gid) in gid_table.v4_table.drain(){
+                    gid_list.push(gid);
+                }
+            },
+            Family::V6 => {
+                for (_, gid) in gid_table.v6_table.drain(){
+                    gid_list.push(gid);
+                }
+            }
+        }
+        if gid_list.len() < num_qp {
+            return Err(CustomError::new("Not enough gids".to_string(), -1).into());
+        }
+    }
+    Ok((gid_list, single_gid))
+}
 pub fn get_gid_ctx_port_from_v4_ip(ip: &Ipv4Addr) -> anyhow::Result<(IbvGid, IbvContext, u8, i32), CustomError> {
     let device_list: *mut *mut ibv_device = unsafe { __ibv_get_device_list(null_mut()) };
 

@@ -23,6 +23,5 @@ pnet = "0.35.0"
 log = "0.4.22"
 env_logger = "0.11.5"
 
-
 [build-dependencies]
 tonic-build = "0.11.0"
